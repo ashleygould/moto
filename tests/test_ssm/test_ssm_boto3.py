@@ -4,6 +4,8 @@ import boto3
 import botocore.exceptions
 import sure   # noqa
 import datetime
+import json
+import hashlib
 
 from moto import mock_ssm
 
@@ -608,3 +610,51 @@ def test_send_command():
     cmd['OutputS3KeyPrefix'].should.equal('pref')
 
     cmd['ExpiresAfter'].should.be.greater_than(before)
+
+
+@mock_ssm
+def test_create_document():
+    document = json.dumps(dict(
+        schemaVersion='2.2',
+        description='Mock SSM Document',
+        parameters=dict(),
+        mainSteps=[
+            dict(
+                action='aws:runShellScript',
+                name='AWS-RunShellScript',
+                inputs=dict(
+                    runCommandand=[
+                        'echo "hello world',
+                    ]
+                )
+            )
+        ]
+    ))
+    #print(document)
+    #print(type(document))
+    client = boto3.client('ssm', region_name='us-east-1')
+    response = client.create_document(
+        #Content=json.dumps(document),
+        Content=json.dumps(json.dumps(document)),
+        Name='AWS-RunShellScript',
+        DocumentType='Command',
+        DocumentFormat='JSON',
+        TargetType='/AWS::EC2::Instance',
+    )
+    print(response)
+    doc = response['DocumentDescription']
+    doc['Name'].should.equal('AWS-RunShellScript')
+    doc['SchemaVersion'].should.equal('2.2')
+    doc['Description'].should.equal('Mock SSM Document')
+    doc['DocumentType'].should.equal('Command')
+    doc['DocumentFormat'].should.equal('JSON')
+    doc['TargetType'].should.equal('/AWS::EC2::Instance')
+    doc['CreateDate'].should.be.a(datetime.datetime)
+    doc['Sha1'].should.equal(hashlib.sha1(document))
+    doc['Sha256'].should.equal(hashlib.sha256(document))
+    doc['HashType'].should.equal('Sha256')
+    doc['Status'].should.equal('Active')
+    doc['DocumentVersion'].should.equal('1')
+    doc['Parameters'].should.be.a(list)
+    doc['Tags'].should.be.a(list)
+
