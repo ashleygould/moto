@@ -630,12 +630,10 @@ def test_create_document():
             )
         ]
     ))
-    #print(document)
-    #print(type(document))
+    print('from test')
     client = boto3.client('ssm', region_name='us-east-1')
     response = client.create_document(
-        #Content=json.dumps(document),
-        Content=json.dumps(json.dumps(document)),
+        Content=document,
         Name='AWS-RunShellScript',
         DocumentType='Command',
         DocumentFormat='JSON',
@@ -649,9 +647,9 @@ def test_create_document():
     doc['DocumentType'].should.equal('Command')
     doc['DocumentFormat'].should.equal('JSON')
     doc['TargetType'].should.equal('/AWS::EC2::Instance')
-    doc['CreateDate'].should.be.a(datetime.datetime)
-    doc['Sha1'].should.equal(hashlib.sha1(document))
-    doc['Sha256'].should.equal(hashlib.sha256(document))
+    doc['CreatedDate'].should.be.a(datetime.datetime)
+    doc['Sha1'].should.equal(hashlib.sha1(document.encode()).hexdigest())
+    doc['Hash'].should.equal(hashlib.sha256(document.encode()).hexdigest())
     doc['HashType'].should.equal('Sha256')
     doc['Status'].should.equal('Active')
     doc['DocumentVersion'].should.equal('1')

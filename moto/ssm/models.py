@@ -211,16 +211,17 @@ class SimpleSystemManagerBackend(BaseBackend):
             TargetType='string'
         )
         """
-        content = json.loads(json.loads(kwargs['Content']))
-        print(content)
-        print(type(content))
+        #print('from model')
+        content = json.loads(kwargs['Content'])
         sha1 = hashlib.sha1(kwargs['Content'].encode())
         sha256 = hashlib.sha256(kwargs['Content'].encode())
         now = datetime.datetime.now()
         return {
             'DocumentDescription': {
-                'Sha1': sha1,
-                'Hash': sha256,
+                #'Sha1': str(sha1),
+                'Sha1': sha1.hexdigest(),
+                #'Hash': str(sha256),
+                'Hash': sha256.hexdigest(),
                 'HashType': 'Sha256',
                 'Name': kwargs['Name'],
                 'Owner': 'fakeaccount@moto-example.com',
