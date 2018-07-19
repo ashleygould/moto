@@ -4,8 +4,12 @@ import boto3
 import botocore.exceptions
 import sure   # noqa
 import datetime
+import uuid
 import json
 import hashlib
+
+from botocore.exceptions import ClientError
+from nose.tools import assert_raises
 
 from moto import mock_ssm
 from .ssm_test_utils import (
@@ -616,6 +620,62 @@ def test_send_command():
 
     cmd['ExpiresAfter'].should.be.greater_than(before)
 
+    # test sending a command without any optional parameters
+    response = client.send_command(
+        DocumentName=ssm_document)
+
+    cmd = response['Command']
+
+    cmd['CommandId'].should_not.be(None)
+    cmd['DocumentName'].should.equal(ssm_document)
+
+
+@mock_ssm
+def test_list_commands():
+    client = boto3.client('ssm', region_name='us-east-1')
+
+    ssm_document = 'AWS-RunShellScript'
+    params = {'commands': ['#!/bin/bash\necho \'hello world\'']}
+
+    response = client.send_command(
+        InstanceIds=['i-123456'],
+        DocumentName=ssm_document,
+        Parameters=params,
+        OutputS3Region='us-east-2',
+        OutputS3BucketName='the-bucket',
+        OutputS3KeyPrefix='pref')
+
+    cmd = response['Command']
+    cmd_id = cmd['CommandId']
+
+    # get the command by id
+    response = client.list_commands(
+        CommandId=cmd_id)
+
+    cmds = response['Commands']
+    len(cmds).should.equal(1)
+    cmds[0]['CommandId'].should.equal(cmd_id)
+
+    # add another command with the same instance id to test listing by
+    # instance id
+    client.send_command(
+        InstanceIds=['i-123456'],
+        DocumentName=ssm_document)
+
+    response = client.list_commands(
+        InstanceId='i-123456')
+
+    cmds = response['Commands']
+    len(cmds).should.equal(2)
+
+    for cmd in cmds:
+        cmd['InstanceIds'].should.contain('i-123456')
+
+    # test the error case for an invalid command id
+    with assert_raises(ClientError):
+        response = client.list_commands(
+            CommandId=str(uuid.uuid4()))
+
 
 @mock_ssm
 def test_create_document():
@@ -631,6 +691,7 @@ def test_create_document():
     response.should.have.key('DocumentDescription')
     validate_ssm_document_description(response['DocumentDescription'])
     #assert False
+
 
 @mock_ssm
 def test_describe_document():
@@ -650,6 +711,7 @@ def test_describe_document():
     response.should.have.key('Document')
     validate_ssm_document_description(response['Document'])
     #assert False
+
 
 @mock_ssm
 def test_list_documents():
@@ -672,6 +734,7 @@ def test_list_documents():
     for doc in response['DocumentIdentifiers']:
         validate_ssm_document_listing(doc)
     #assert False
+
 
 @mock_ssm
 def test_delete_document():

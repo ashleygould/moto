@@ -206,6 +206,11 @@ class SimpleSystemManagerResponse(BaseResponse):
             self.ssm_backend.send_command(**self.request_params)
         )
 
+    def list_commands(self):
+        return json.dumps(
+            self.ssm_backend.list_commands(**self.request_params)
+        )
+
     def create_document(self):
         return json.dumps(
             self.ssm_backend.create_document(**self.request_params)
