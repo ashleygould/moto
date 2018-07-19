@@ -88,27 +88,25 @@ class Document(BaseModel):
         self.latest_version=1
         self.default_version=1
 
-    def describe(self):
+    def _describe(self):
         return {
-            'DocumentDescription': {
-                'Hash': self.sha256_digest,
-                'HashType': 'Sha256',
-                'Name': self.name,
-                'Owner': self.owner,
-                'CreatedDate': unix_time(self.created_time),
-                'Status': 'Active',
-                'DocumentVersion': str(self.document_version),
-                'Description': self.content['description'],
-                'Parameters': [],
-                'PlatformTypes': ['Linux'],
-                'DocumentType': self.document_type,
-                'SchemaVersion': self.content['schemaVersion'],
-                'LatestVersion': str(self.latest_version),
-                'DefaultVersion': str(self.default_version),
-                'DocumentFormat': self.document_format,
-                'TargetType': self.target_type,
-                'Tags': [],
-            }
+            'Hash': self.sha256_digest,
+            'HashType': 'Sha256',
+            'Name': self.name,
+            'Owner': self.owner,
+            'CreatedDate': unix_time(self.created_time),
+            'Status': 'Active',
+            'DocumentVersion': str(self.document_version),
+            'Description': self.content['description'],
+            'Parameters': [],
+            'PlatformTypes': ['Linux'],
+            'DocumentType': self.document_type,
+            'SchemaVersion': self.content['schemaVersion'],
+            'LatestVersion': str(self.latest_version),
+            'DefaultVersion': str(self.default_version),
+            'DocumentFormat': self.document_format,
+            'TargetType': self.target_type,
+            'Tags': [],
         }
 
 
@@ -255,16 +253,51 @@ class SimpleSystemManagerBackend(BaseBackend):
         }
 
     def create_document(self, **kwargs):
-        new_document = Document(kwargs['Content'], kwargs['Name'], **kwargs)
-        self._documents.append(new_document)
-        return new_document.describe()
+        document = Document(kwargs['Content'], kwargs['Name'], **kwargs)
+        self._documents.append(document)
+        return {'DocumentDescription': document._describe()}
+
+    def delete_document(self, **kwargs):
+        try:
+            document = [
+                document for document in self._documents
+                if document.name == kwargs['Name']
+            ].pop(0)
+        except IndexError as e:
+            #raise boto error ???
+            return dict()
+        self._documents.remove(document)
+        return {}
 
     def describe_document(self, **kwargs):
-        document = [
-            document for document in self._documents 
-            if document.name == kwargs['Name']
-        ].pop(0)
-        return document.describe()
+        try:
+            document = [
+                document for document in self._documents
+                if document.name == kwargs['Name']
+            ].pop(0)
+        except IndexError as e:
+            #raise boto error ???
+            return dict()
+        return {'Document': document._describe()}
+
+    def list_documents(self, **kwargs):
+        identifiers = []
+        listing_keys = [
+            'Name',
+            'Owner',
+            'PlatformTypes',
+            'DocumentVersion',
+            'DocumentType',
+            'SchemaVersion',
+            'DocumentFormat',
+            'TargetType',
+            'Tags',
+        ]
+        for document in self._documents:
+            desc = document._describe()
+            listing = {key: value for key,value in desc.items() if key in listing_keys}
+            identifiers.append(listing)
+        return {'DocumentIdentifiers': identifiers}
 
 
 ssm_backends = {}

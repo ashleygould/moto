@@ -4,6 +4,7 @@ import sure   # noqa
 import datetime
 import hashlib
 import json
+import six
 
 from moto.ssm.models import FAKE_ACCOUNT_ID
 
@@ -24,8 +25,7 @@ MOCK_SSM_DOCUMENT = json.dumps(dict(
     ]
 ))
 
-def validate_ssm_document(response):
-    doc = response['DocumentDescription']
+def validate_ssm_document_description(doc):
     doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT.encode()).hexdigest())
     doc['HashType'].should.equal('Sha256')
     doc['Name'].should.equal('AWS-RunShellScript')
@@ -44,7 +44,45 @@ def validate_ssm_document(response):
     doc['DocumentFormat'].should.equal('JSON')
     doc['TargetType'].should.equal('/AWS::EC2::Instance')
     doc['Tags'].should.be.a(list)
-    #assert False
+
+def validate_ssm_document_listing(doc):
+    doc['Name'].should.be.a(six.string_types)
+    doc['Owner'].should.equal(FAKE_ACCOUNT_ID)
+    doc['DocumentVersion'].should.be.a(six.string_types)
+    doc['PlatformTypes'].should.be.a(list)
+    #doc['PlatformTypes'][0].should.equal('Linux')
+    doc['DocumentType'].should.be.within(['Command', 'Policy', 'Automation'])
+    doc['SchemaVersion'].should.be.a(six.string_types)
+    doc['DocumentFormat'].should.be.within(['JSON', 'YAML'])
+    #doc['TargetType'].should.equal('/AWS::EC2::Instance')
+    doc['TargetType'].should.be.a(six.string_types)
+    doc['Tags'].should.be.a(list)
+
+"""
+{
+    'DocumentIdentifiers': [
+        {
+            'Name': 'string',
+            'Owner': 'string',
+            'PlatformTypes': [
+                'Windows'|'Linux',
+            ],
+            'DocumentVersion': 'string',
+            'DocumentType': 'Command'|'Policy'|'Automation',
+            'SchemaVersion': 'string',
+            'DocumentFormat': 'YAML'|'JSON',
+            'TargetType': 'string',
+            'Tags': [
+                {
+                    'Key': 'string',
+                    'Value': 'string'
+                },
+            ]
+        },
+    ],
+    'NextToken': 'string'
+}
+"""
 
 """
 {
@@ -71,4 +109,3 @@ def validate_ssm_document(response):
     }
 }
 """
-

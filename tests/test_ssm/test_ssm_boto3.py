@@ -10,7 +10,8 @@ import hashlib
 from moto import mock_ssm
 from .ssm_test_utils import (
     MOCK_SSM_DOCUMENT,
-    validate_ssm_document,
+    validate_ssm_document_description,
+    validate_ssm_document_listing,
 )
 
 
@@ -618,23 +619,6 @@ def test_send_command():
 
 @mock_ssm
 def test_create_document():
-    #document = json.dumps(dict(
-    #    schemaVersion='2.2',
-    #    description='Mock SSM Document',
-    #    parameters=dict(),
-    #    mainSteps=[
-    #        dict(
-    #            action='aws:runShellScript',
-    #            name='AWS-RunShellScript',
-    #            inputs=dict(
-    #                runCommandand=[
-    #                    'echo "hello world',
-    #                ]
-    #            )
-    #        )
-    #    ]
-    #))
-    print('from test')
     client = boto3.client('ssm', region_name='us-east-1')
     response = client.create_document(
         Content=MOCK_SSM_DOCUMENT,
@@ -643,5 +627,90 @@ def test_create_document():
         DocumentFormat='JSON',
         TargetType='/AWS::EC2::Instance',
     )
+    #print(response)
+    response.should.have.key('DocumentDescription')
+    validate_ssm_document_description(response['DocumentDescription'])
+    #assert False
+
+@mock_ssm
+def test_describe_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT,
+        Name='AWS-RunShellScript',
+        DocumentType='Command',
+        DocumentFormat='JSON',
+        TargetType='/AWS::EC2::Instance',
+    )
+    response = client.describe_document(
+        Name='AWS-RunShellScript',
+        DocumentVersion='1',
+    )
+    #print(response)
+    response.should.have.key('Document')
+    validate_ssm_document_description(response['Document'])
+    #assert False
+
+@mock_ssm
+def test_list_documents():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT,
+        Name='AWS-RunShellScript-01',
+    )
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT,
+        Name='AWS-RunShellScript-02',
+    )
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT,
+        Name='AWS-RunShellScript-03',
+    )
+    response = client.list_documents()
+    #print(response)
+    response.should.have.key('DocumentIdentifiers')
+    for doc in response['DocumentIdentifiers']:
+        validate_ssm_document_listing(doc)
+    #assert False
+
+@mock_ssm
+def test_delete_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT,
+        Name='AWS-RunShellScript',
+        DocumentType='Command',
+        DocumentFormat='JSON',
+        TargetType='/AWS::EC2::Instance',
+    )
+    response = client.delete_document(
+        Name='AWS-RunShellScript',
+    )
     print(response)
-    validate_ssm_document(response)
+    response.should.be.a(dict)
+    response.pop('ResponseMetadata')
+    response.should.equal(dict())
+    # TODO: should throw exception
+    response = client.describe_document(
+        Name='AWS-RunShellScript',
+    )
+    #assert False
+
+
+"""
+ssm document features and tests:
+    validate creating yaml doc
+    set parameters
+    set tags
+    DONE list documents
+    DONE delete doc
+    update doc
+    get doc
+    figure out about setting PlatformTypes
+    figure out about exception handling
+"""
+"""
+(python3.6) agould@horus:~> aws ssm describe-document --name blee
+
+An error occurred (InvalidDocument) when calling the DescribeDocument operation: Document with name blee does not exist.
+"""
