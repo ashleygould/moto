@@ -3,6 +3,7 @@ from __future__ import unicode_literals
 from collections import defaultdict
 
 from moto.core import BaseBackend, BaseModel
+from moto.core.utils import unix_time
 from moto.ec2 import ec2_backends
 
 import datetime
@@ -10,6 +11,8 @@ import time
 import uuid
 import json
 import hashlib
+
+FAKE_ACCOUNT_ID = '123456789012'
 
 
 class Parameter(BaseModel):
@@ -60,11 +63,61 @@ class Parameter(BaseModel):
         return r
 
 
+class Document(BaseModel):
+    """
+    response = client.create_document(
+        Content='string',
+        Name='string',
+        DocumentType='Command'|'Policy'|'Automation',
+        DocumentFormat='YAML'|'JSON',
+        TargetType='string'
+    )
+    """
+
+    def __init__(self, content, name, **kwargs):
+        self.content = json.loads(content)
+        self.name = name
+        self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
+        self.created_time = datetime.datetime.utcnow()
+        self.document_type=kwargs.get('DocumentType', 'Command')
+        self.document_format=kwargs.get('DocumentFormat', 'JSON')
+        self.target_type=kwargs.get('TargetType', '')
+        self.owner=FAKE_ACCOUNT_ID
+        self.document_history=[content]
+        self.document_version=1
+        self.latest_version=1
+        self.default_version=1
+
+    def describe(self):
+        return {
+            'DocumentDescription': {
+                'Hash': self.sha256_digest,
+                'HashType': 'Sha256',
+                'Name': self.name,
+                'Owner': self.owner,
+                'CreatedDate': unix_time(self.created_time),
+                'Status': 'Active',
+                'DocumentVersion': str(self.document_version),
+                'Description': self.content['description'],
+                'Parameters': [],
+                'PlatformTypes': ['Linux'],
+                'DocumentType': self.document_type,
+                'SchemaVersion': self.content['schemaVersion'],
+                'LatestVersion': str(self.latest_version),
+                'DefaultVersion': str(self.default_version),
+                'DocumentFormat': self.document_format,
+                'TargetType': self.target_type,
+                'Tags': [],
+            }
+        }
+
+
 class SimpleSystemManagerBackend(BaseBackend):
 
     def __init__(self):
         self._parameters = {}
         self._resource_tags = defaultdict(lambda: defaultdict(dict))
+        self._documents = []
 
     def delete_parameter(self, name):
         try:
@@ -202,43 +255,16 @@ class SimpleSystemManagerBackend(BaseBackend):
         }
 
     def create_document(self, **kwargs):
-        """
-        response = client.create_document(
-            Content='string',
-            Name='string',
-            DocumentType='Command'|'Policy'|'Automation',
-            DocumentFormat='YAML'|'JSON',
-            TargetType='string'
-        )
-        """
-        FAKEACCOUNTID = '123456789012'
-        content = json.loads(kwargs['Content'])
-        sha1 = hashlib.sha1(kwargs['Content'].encode())
-        sha256 = hashlib.sha256(kwargs['Content'].encode())
-        now = datetime.datetime.now()
-        return {
-            'DocumentDescription': {
-                'Hash': sha256.hexdigest(),
-                'HashType': 'Sha256',
-                'Name': kwargs['Name'],
-                'Owner': FAKEACCOUNTID,
-                'CreatedDate': now.isoformat(),
-                'Status': 'Active',
-                'DocumentVersion': '1',
-                'Description': content['description'],
-                'Parameters': [],
-                'PlatformTypes': [
-                    'Linux',
-                ],
-                'DocumentType': kwargs.get('DocumentType'),
-                'SchemaVersion': content['schemaVersion'],
-                'LatestVersion': '1',
-                'DefaultVersion': '1',
-                'DocumentFormat': kwargs.get('DocumentFormat'),
-                'TargetType': kwargs.get('TargetType'),
-                'Tags': [],
-            }
-        }
+        new_document = Document(kwargs['Content'], kwargs['Name'], **kwargs)
+        self._documents.append(new_document)
+        return new_document.describe()
+
+    def describe_document(self, **kwargs):
+        document = [
+            document for document in self._documents 
+            if document.name == kwargs['Name']
+        ].pop(0)
+        return document.describe()
 
 
 ssm_backends = {}
