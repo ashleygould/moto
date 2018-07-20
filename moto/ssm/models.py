@@ -4,11 +4,14 @@ from collections import defaultdict
 
 from moto.core import BaseBackend, BaseModel
 from moto.core.exceptions import RESTError
+from moto.core.utils import unix_time
 from moto.ec2 import ec2_backends
 
 import datetime
 import time
 import uuid
+import json
+import hashlib
 
 
 class Parameter(BaseModel):
@@ -133,12 +136,63 @@ class Command(BaseModel):
         return r
 
 
+FAKE_ACCOUNT_ID = '123456789012'
+
+
+class Document(BaseModel):
+    """
+    response = client.create_document(
+        Content='string',
+        Name='string',
+        DocumentType='Command'|'Policy'|'Automation',
+        DocumentFormat='YAML'|'JSON',
+        TargetType='string'
+    )
+    """
+
+    def __init__(self, content, name, **kwargs):
+        self.content = json.loads(content)
+        self.name = name
+        self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
+        self.created_time = datetime.datetime.utcnow()
+        self.document_type = kwargs.get('DocumentType', 'Command')
+        self.document_format = kwargs.get('DocumentFormat', 'JSON')
+        self.target_type = kwargs.get('TargetType', '')
+        self.owner = FAKE_ACCOUNT_ID
+        self.document_history = [content]
+        self.document_version = 1
+        self.latest_version = 1
+        self.default_version = 1
+
+    def _describe(self):
+        return {
+            'Hash': self.sha256_digest,
+            'HashType': 'Sha256',
+            'Name': self.name,
+            'Owner': self.owner,
+            'CreatedDate': unix_time(self.created_time),
+            'Status': 'Active',
+            'DocumentVersion': str(self.document_version),
+            'Description': self.content['description'],
+            'Parameters': [],
+            'PlatformTypes': ['Linux'],
+            'DocumentType': self.document_type,
+            'SchemaVersion': self.content['schemaVersion'],
+            'LatestVersion': str(self.latest_version),
+            'DefaultVersion': str(self.default_version),
+            'DocumentFormat': self.document_format,
+            'TargetType': self.target_type,
+            'Tags': [],
+        }
+
+
 class SimpleSystemManagerBackend(BaseBackend):
 
     def __init__(self):
         self._parameters = {}
         self._resource_tags = defaultdict(lambda: defaultdict(dict))
         self._commands = []
+        self._documents = []
 
     def delete_parameter(self, name):
         try:
@@ -297,6 +351,63 @@ class SimpleSystemManagerBackend(BaseBackend):
         return [
             command for command in self._commands
             if instance_id in command.instance_ids]
+
+    def create_document(self, **kwargs):
+        document = Document(kwargs['Content'], kwargs['Name'], **kwargs)
+        self._documents.append(document)
+        return {'DocumentDescription': document._describe()}
+
+    def get_document_by_name(self, name):
+        document = next((doc for doc in self._documents if doc.name == name), None)
+        if document is None:
+            raise RESTError(
+                'InvalidDocument',
+                'Document with name {} does not exist.'.format(name)
+            )
+        return document
+
+    def describe_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        return {'Document': document._describe()}
+
+    def update_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document.content = json.loads(kwargs['Content'])
+        document.sha256_digest = hashlib.sha256(kwargs['Content'].encode()).hexdigest()
+        if 'DocumentFormat' in kwargs:
+            document.document_format = kwargs('DocumentFormat')
+        if 'TargetType' in kwargs:
+            document.target_type = kwargs('TargetType')
+        #if 'DocumentVersion' in kwargs:
+        #    version = kwargs['DocumentVersion']
+        document.document_version += 1
+        document.latest_version += 1
+        document.document_history.append(kwargs['Content'])
+        return {'DocumentDescription': document._describe()}
+
+    def delete_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        self._documents.remove(document)
+        return {}
+
+    def list_documents(self, **kwargs):
+        identifiers = []
+        listing_keys = [
+            'Name',
+            'Owner',
+            'PlatformTypes',
+            'DocumentVersion',
+            'DocumentType',
+            'SchemaVersion',
+            'DocumentFormat',
+            'TargetType',
+            'Tags',
+        ]
+        for document in self._documents:
+            desc = document._describe()
+            listing = {key: value for key, value in desc.items() if key in listing_keys}
+            identifiers.append(listing)
+        return {'DocumentIdentifiers': identifiers}
 
 
 ssm_backends = {}

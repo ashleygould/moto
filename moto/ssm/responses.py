@@ -210,3 +210,28 @@ class SimpleSystemManagerResponse(BaseResponse):
         return json.dumps(
             self.ssm_backend.list_commands(**self.request_params)
         )
+
+    def create_document(self):
+        return json.dumps(
+            self.ssm_backend.create_document(**self.request_params)
+        )
+
+    def update_document(self):
+        return json.dumps(
+            self.ssm_backend.update_document(**self.request_params)
+        )
+
+    def delete_document(self):
+        return json.dumps(
+            self.ssm_backend.delete_document(**self.request_params)
+        )
+
+    def describe_document(self):
+        return json.dumps(
+            self.ssm_backend.describe_document(**self.request_params)
+        )
+
+    def list_documents(self):
+        return json.dumps(
+            self.ssm_backend.list_documents(**self.request_params)
+        )

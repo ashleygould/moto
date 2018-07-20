@@ -5,11 +5,19 @@ import botocore.exceptions
 import sure   # noqa
 import datetime
 import uuid
+import json
+import hashlib
 
 from botocore.exceptions import ClientError
 from nose.tools import assert_raises
 
 from moto import mock_ssm
+from .ssm_test_utils import (
+    MOCK_SSM_DOCUMENT_01,
+    MOCK_SSM_DOCUMENT_02,
+    validate_ssm_document_description,
+    validate_ssm_document_listing,
+)
 
 
 @mock_ssm
@@ -668,3 +676,160 @@ def test_list_commands():
     with assert_raises(ClientError):
         response = client.list_commands(
             CommandId=str(uuid.uuid4()))
+
+
+@mock_ssm
+def test_create_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    response = client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+        DocumentType='Command',
+        DocumentFormat='JSON',
+        TargetType='/AWS::EC2::Instance',
+    )
+    #print(response)
+    response.should.have.key('DocumentDescription')
+    validate_ssm_document_description(response['DocumentDescription'])
+    #assert False
+
+
+@mock_ssm
+def test_describe_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+        DocumentType='Command',
+        DocumentFormat='JSON',
+        TargetType='/AWS::EC2::Instance',
+    )
+    response = client.describe_document(
+        Name='AWS-RunShellScript',
+        DocumentVersion='1',
+    )
+    #print(response)
+    response.should.have.key('Document')
+    validate_ssm_document_description(response['Document'])
+    #assert False
+
+
+@mock_ssm
+def test_list_documents():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript-01',
+    )
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript-02',
+    )
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript-03',
+    )
+    response = client.list_documents()
+    #print(response)
+    response.should.have.key('DocumentIdentifiers')
+    for doc in response['DocumentIdentifiers']:
+        validate_ssm_document_listing(doc)
+    #assert False
+
+
+@mock_ssm
+def test_delete_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+    )
+    response = client.delete_document(
+        Name='AWS-RunShellScript',
+    )
+    print(response)
+    response.should.be.a(dict)
+    response.pop('ResponseMetadata')
+    response.should.equal(dict())
+    with assert_raises(ClientError):
+        response = client.describe_document(
+            Name='AWS-RunShellScript',
+        )
+    #assert False
+
+
+@mock_ssm
+def test_update_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    response = client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+    )
+    print(response)
+    response = client.update_document(
+        Content=MOCK_SSM_DOCUMENT_02,
+        Name='AWS-RunShellScript',
+    )
+    print(response)
+    response.should.have.key('DocumentDescription')
+    doc = response['DocumentDescription']
+    doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT_02.encode()).hexdigest())
+    doc['Name'].should.equal('AWS-RunShellScript')
+    doc['DocumentVersion'].should.equal('2')
+    doc['Description'].should.equal('An Updated Mock SSM Document')
+    doc['LatestVersion'].should.equal('2')
+    doc['DefaultVersion'].should.equal('1')
+    assert False
+
+"""
+ssm document features and tests:
+    validate creating yaml doc
+    set parameters
+    set tags
+    DONE list documents
+    list documents by filter
+    DONE delete doc
+    update doc
+    describe doc by version
+    get doc
+    figure out about setting PlatformTypes
+    DONE figure out about exception handling
+"""
+"""
+{
+    'DocumentVersions': [
+        {
+            'Name': 'string',
+            'DocumentVersion': 'string',
+            'CreatedDate': datetime(2015, 1, 1),
+            'IsDefaultVersion': True|False,
+            'DocumentFormat': 'YAML'|'JSON'
+        },
+    ],
+    'NextToken': 'string'
+}
+
+Command:
+
+   aws ssm list-document-versions --name "patchWindowsAmi"
+
+Output:
+
+   {
+         "DocumentVersions": [
+                 {
+                         "IsDefaultVersion": false,
+                         "Name": "patchWindowsAmi",
+                         "DocumentVersion": "2",
+                         "CreatedDate": 1475799950.484
+                 },
+                 {
+                         "IsDefaultVersion": false,
+                         "Name": "patchWindowsAmi",
+                         "DocumentVersion": "1",
+                         "CreatedDate": 1475799931.064
+                 }
+         ]
+   }
+
+"""
