@@ -216,6 +216,11 @@ class SimpleSystemManagerResponse(BaseResponse):
             self.ssm_backend.create_document(**self.request_params)
         )
 
+    def update_document(self):
+        return json.dumps(
+            self.ssm_backend.update_document(**self.request_params)
+        )
+
     def delete_document(self):
         return json.dumps(
             self.ssm_backend.delete_document(**self.request_params)

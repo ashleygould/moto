@@ -8,7 +8,7 @@ import six
 
 from moto.ssm.models import FAKE_ACCOUNT_ID
 
-MOCK_SSM_DOCUMENT = json.dumps(dict(
+MOCK_SSM_DOCUMENT_01 = json.dumps(dict(
     schemaVersion='2.2',
     description='Mock SSM Document',
     parameters=dict(),
@@ -25,8 +25,25 @@ MOCK_SSM_DOCUMENT = json.dumps(dict(
     ]
 ))
 
+MOCK_SSM_DOCUMENT_02 = json.dumps(dict(
+    schemaVersion='2.2',
+    description='An Updated Mock SSM Document',
+    parameters=dict(),
+    mainSteps=[
+        dict(
+            action='aws:runShellScript',
+            name='AWS-RunShellScript',
+            inputs=dict(
+                runCommandand=[
+                    'echo "hello world from updated ssm document',
+                ]
+            )
+        )
+    ]
+))
+
 def validate_ssm_document_description(doc):
-    doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT.encode()).hexdigest())
+    doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT_01.encode()).hexdigest())
     doc['HashType'].should.equal('Sha256')
     doc['Name'].should.equal('AWS-RunShellScript')
     doc['Owner'].should.equal(FAKE_ACCOUNT_ID)

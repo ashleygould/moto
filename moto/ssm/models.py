@@ -370,15 +370,25 @@ class SimpleSystemManagerBackend(BaseBackend):
         document = self.get_document_by_name(kwargs['Name'])
         return {'Document': document._describe()}
 
+    def update_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document.content = json.loads(kwargs['Content'])
+        document.sha256_digest = hashlib.sha256(kwargs['Content'].encode()).hexdigest()
+        if 'DocumentFormat' in kwargs:
+            document.document_format = kwargs('DocumentFormat')
+        if 'TargetType' in kwargs:
+            document.target_type = kwargs('TargetType')
+        #if 'DocumentVersion' in kwargs:
+        #    version = kwargs['DocumentVersion']
+        document.document_version += 1
+        document.latest_version += 1
+        document.document_history.append(kwargs['Content'])
+        return {'DocumentDescription': document._describe()}
+
     def delete_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
         self._documents.remove(document)
         return {}
-
-    def update_document(self, **kwargs):
-        document = self.get_document_by_name(kwargs['Name'])
-        #self._documents.remove(document)
-        #return {}
 
     def list_documents(self, **kwargs):
         identifiers = []
