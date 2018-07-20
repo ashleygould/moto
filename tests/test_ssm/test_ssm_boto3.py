@@ -742,9 +742,6 @@ def test_delete_document():
     client.create_document(
         Content=MOCK_SSM_DOCUMENT,
         Name='AWS-RunShellScript',
-        DocumentType='Command',
-        DocumentFormat='JSON',
-        TargetType='/AWS::EC2::Instance',
     )
     response = client.delete_document(
         Name='AWS-RunShellScript',
@@ -753,10 +750,10 @@ def test_delete_document():
     response.should.be.a(dict)
     response.pop('ResponseMetadata')
     response.should.equal(dict())
-    # TODO: should throw exception
-    response = client.describe_document(
-        Name='AWS-RunShellScript',
-    )
+    with assert_raises(ClientError):
+        response = client.describe_document(
+            Name='AWS-RunShellScript',
+        )
     #assert False
 
 
@@ -766,14 +763,11 @@ ssm document features and tests:
     set parameters
     set tags
     DONE list documents
+    list documents by filter
     DONE delete doc
     update doc
+    describe doc by version
     get doc
     figure out about setting PlatformTypes
-    figure out about exception handling
-"""
-"""
-(python3.6) agould@horus:~> aws ssm describe-document --name blee
-
-An error occurred (InvalidDocument) when calling the DescribeDocument operation: Document with name blee does not exist.
+    DONE figure out about exception handling
 """

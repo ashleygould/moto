@@ -155,14 +155,14 @@ class Document(BaseModel):
         self.name = name
         self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
         self.created_time = datetime.datetime.utcnow()
-        self.document_type=kwargs.get('DocumentType', 'Command')
-        self.document_format=kwargs.get('DocumentFormat', 'JSON')
-        self.target_type=kwargs.get('TargetType', '')
-        self.owner=FAKE_ACCOUNT_ID
-        self.document_history=[content]
-        self.document_version=1
-        self.latest_version=1
-        self.default_version=1
+        self.document_type = kwargs.get('DocumentType', 'Command')
+        self.document_format = kwargs.get('DocumentFormat', 'JSON')
+        self.target_type = kwargs.get('TargetType', '')
+        self.owner = FAKE_ACCOUNT_ID
+        self.document_history = [content]
+        self.document_version = 1
+        self.latest_version = 1
+        self.default_version = 1
 
     def _describe(self):
         return {
@@ -357,28 +357,28 @@ class SimpleSystemManagerBackend(BaseBackend):
         self._documents.append(document)
         return {'DocumentDescription': document._describe()}
 
+    def get_document_by_name(self, name):
+        document = next((doc for doc in self._documents if doc.name == name), None)
+        if document is None:
+            raise RESTError(
+                'InvalidDocument',
+                'Document with name {} does not exist.'.format(name)
+            )
+        return document
+
+    def describe_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        return {'Document': document._describe()}
+
     def delete_document(self, **kwargs):
-        try:
-            document = [
-                document for document in self._documents
-                if document.name == kwargs['Name']
-            ].pop(0)
-        except IndexError as e:
-            #raise boto error ???
-            return dict()
+        document = self.get_document_by_name(kwargs['Name'])
         self._documents.remove(document)
         return {}
 
-    def describe_document(self, **kwargs):
-        try:
-            document = [
-                document for document in self._documents
-                if document.name == kwargs['Name']
-            ].pop(0)
-        except IndexError as e:
-            #raise boto error ???
-            return dict()
-        return {'Document': document._describe()}
+    def update_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        #self._documents.remove(document)
+        #return {}
 
     def list_documents(self, **kwargs):
         identifiers = []
@@ -395,7 +395,7 @@ class SimpleSystemManagerBackend(BaseBackend):
         ]
         for document in self._documents:
             desc = document._describe()
-            listing = {key: value for key,value in desc.items() if key in listing_keys}
+            listing = {key: value for key, value in desc.items() if key in listing_keys}
             identifiers.append(listing)
         return {'DocumentIdentifiers': identifiers}
 
