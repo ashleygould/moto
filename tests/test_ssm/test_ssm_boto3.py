@@ -761,18 +761,18 @@ def test_delete_document():
 @mock_ssm
 def test_update_document():
     client = boto3.client('ssm', region_name='us-east-1')
-    response = client.create_document(
+    response01 = client.create_document(
         Content=MOCK_SSM_DOCUMENT_01,
         Name='AWS-RunShellScript',
     )
-    print(response)
-    response = client.update_document(
+    print(response01)
+    response02 = client.update_document(
         Content=MOCK_SSM_DOCUMENT_02,
         Name='AWS-RunShellScript',
     )
-    print(response)
-    response.should.have.key('DocumentDescription')
-    doc = response['DocumentDescription']
+    print(response02)
+    response02.should.have.key('DocumentDescription')
+    doc = response02['DocumentDescription']
     doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT_02.encode()).hexdigest())
     doc['Name'].should.equal('AWS-RunShellScript')
     doc['DocumentVersion'].should.equal('2')

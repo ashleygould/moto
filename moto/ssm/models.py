@@ -137,12 +137,11 @@ class Command(BaseModel):
 
 
 class DocumentVersion(object):
-    def __init__(self, version_number, content, document_format):
+    def __init__(self, content, document_format):
         self.content = json.loads(content)
         self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
         self.created_time = datetime.datetime.utcnow()
         self.document_format = document_format
-        self.version_number = version_number
 
 
 FAKE_ACCOUNT_ID = '123456789012'
@@ -155,33 +154,48 @@ class Document(BaseModel):
         self.document_type = document_type
         self.target_type = target_type
         self.owner = FAKE_ACCOUNT_ID
-        self.default_version = '1'
+        self.default_version = ''
         self.document_versions = []
 
+    # TODO: self.document_versions magically sorted
+    #    def date_key(a):
+    #        """
+    #        a: date as string
+    #        """
+    #        a = datetime.datetime.strptime(a, '%d.%m.%Y').date()
+    #        return a
+    #    sorted_dates = sorted(sorted_dates, key=date_key)
     @property
     def latest_version(self):
         return str(len(self.document_versions))
-        # self.document_versions magically sorted
-        #import datetime
-        #    def date_key(a):
-        #        """
-        #        a: date as string
-        #        """
-        #        a = datetime.datetime.strptime(a, '%d.%m.%Y').date()
-        #        return a
-        #    sorted_dates = sorted(sorted_dates, key=date_key)
 
-    def get_version(self, version_number):
-        document_version = next((
-            dv for dv in self.document_versions 
-            if dv.version_number == version_number
-        ), None) 
-        if document_version is None:
-            # TODO: get confirmation of error message
-            raise RESTError('InvalidDocumentVersion', 'Invalid document version.')
-        return document_version
+    def index_from_version_str(self, version_str):
+        try:
+            return int(version_str) - 1
+        except ValueError:
+            raise RESTError(
+                'ValidationException',
+                "Value '{}' at 'documentVersion' failed to satisfy constraint: Member must satisfy regular expression pattern: ([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$".format(
+                    version_str
+                ))
 
-    def describe(self, document_version):
+    def get_version(self, version_str):
+        index = self.index_from_version_str(version_str)
+        try:
+            return self.document_versions[index]
+        except IndexError:
+            raise RESTError(
+                'InvalidDocumentVersion',
+                'Document version: {} is invalid for {}, latest version is {}'.format(
+                    version_str,
+                    self.name,
+                    self.lastest_version
+                ))
+
+    def describe(self, version_str=None):
+        if not version_str:
+            version_str = self.default_version
+        document_version = self.get_version(version_str)
         return {
             'Hash': document_version.sha256_digest,
             'HashType': 'Sha256',
@@ -189,7 +203,7 @@ class Document(BaseModel):
             'Owner': self.owner,
             'CreatedDate': unix_time(document_version.created_time),
             'Status': 'Active',
-            'DocumentVersion': document_version.version_number,
+            'DocumentVersion': version_str,
             'Description': document_version.content['description'],
             'Parameters': [],
             'PlatformTypes': ['Linux'],
@@ -370,21 +384,36 @@ class SimpleSystemManagerBackend(BaseBackend):
             if instance_id in command.instance_ids]
 
     def create_document(self, **kwargs):
-        ## DocumentType='Command'|'Policy'|'Automation'
+        # TODO: DocumentType='Command'|'Policy'|'Automation'
         document = Document(
             kwargs['Name'],
             kwargs.get('DocumentType', 'Command'),
             kwargs.get('TargetType', ''),
         )
-        # DocumentFormat='YAML'|'JSON'
+        # TODO: DocumentFormat='YAML'|'JSON'
         document_version = DocumentVersion(
-            '1',
             kwargs['Content'],
             kwargs.get('DocumentFormat', 'JSON'),
         )
+        document.default_version = '1'
         document.document_versions.append(document_version)
         self._documents.append(document)
-        return {'DocumentDescription': document.describe(document_version)}
+        return {'DocumentDescription': document.describe()}
+
+    def update_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document_version = DocumentVersion(
+            kwargs['Content'],
+            kwargs.get('DocumentFormat', 'JSON'),
+        )
+        if 'DocumentVersion' in kwargs:
+            version_index = document.index_from_version_str(kwargs['DocumentVersion'])
+            document.document_versions[version_index] = document_version
+        else:
+            document.document_versions.append(document_version)
+        version_str = str(document.document_versions.index(document_version) + 1)
+        print(version_str)
+        return {'DocumentDescription': document.describe(version_str)}
 
     def get_document_by_name(self, name):
         document = next((doc for doc in self._documents if doc.name == name), None)
@@ -397,22 +426,7 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def describe_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
-        document_version = document.get_version(kwargs.get('DocumentVersion'))
-        return {'Document': document.describe(document_version)}
-
-    def update_document(self, **kwargs):
-        document = self.get_document_by_name(kwargs['Name'])
-        version_number = kwargs.get(
-            'DocumentVersion',
-            str(len(document.document_versions))
-        )
-        new_document_version = DocumentVersion(
-            version_number,
-            kwargs['Content'],
-            kwargs.get('DocumentFormat', 'JSON'),
-        )
-        document.document_versions[int(version_number)] = new_document_version
-        return {'DocumentDescription': document.describe(new_document_version)}
+        return {'Document': document.describe(kwargs.get('DocumentVersion'))}
 
     def delete_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
@@ -433,8 +447,7 @@ class SimpleSystemManagerBackend(BaseBackend):
             'Tags',
         ]
         for document in self._documents:
-            document_version = document.get_version(document.default_version)
-            desc = document.describe(document_version)
+            desc = document.describe()
             listing = {key: value for key, value in desc.items() if key in listing_keys}
             identifiers.append(listing)
         return {'DocumentIdentifiers': identifiers}
