@@ -779,57 +779,102 @@ def test_update_document():
     doc['Description'].should.equal('An Updated Mock SSM Document')
     doc['LatestVersion'].should.equal('2')
     doc['DefaultVersion'].should.equal('1')
-    assert False
+    #assert False
+
+
+@mock_ssm
+def test_list_document_versions():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+    )
+    client.update_document(
+        Content=MOCK_SSM_DOCUMENT_02,
+        Name='AWS-RunShellScript',
+    )
+    response = client.list_document_versions(
+        Name='AWS-RunShellScript',
+    )
+    response.should.have.key('DocumentVersions').should.be.a(list)
+    print(response)
+    for version in response['DocumentVersions']:
+        version['Name'].should.equal('AWS-RunShellScript')
+        version['CreatedDate'].should.be.a(datetime.datetime)
+        version['DocumentFormat'].should.be.within(['YAML', 'JSON'])
+    response['DocumentVersions'][0]['DocumentVersion'].should.equal('1')
+    response['DocumentVersions'][1]['DocumentVersion'].should.equal('2')
+    response['DocumentVersions'][0]['IsDefaultVersion'].should.be.true
+    response['DocumentVersions'][1]['IsDefaultVersion'].should.be.false
+    #assert False
+
+
+@mock_ssm
+def test_update_document_default_version():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+    )
+    client.update_document(
+        Content=MOCK_SSM_DOCUMENT_02,
+        Name='AWS-RunShellScript',
+    )
+    response = client.update_document_default_version(
+        Name='AWS-RunShellScript',
+        DocumentVersion='2'
+    )
+    print(response)
+    response.should.have.key('Description').should.be.a(dict)
+    response['Description']['Name'].should.equal('AWS-RunShellScript')
+    response['Description']['DefaultVersion'].should.equal('2')
+    response = client.list_document_versions(
+        Name='AWS-RunShellScript',
+    )
+    print(response)
+    response['DocumentVersions'][0]['IsDefaultVersion'].should.be.false
+    response['DocumentVersions'][1]['IsDefaultVersion'].should.be.true
+    #assert False
+
+@mock_ssm
+def test_get_document():
+    client = boto3.client('ssm', region_name='us-east-1')
+    client.create_document(
+        Content=MOCK_SSM_DOCUMENT_01,
+        Name='AWS-RunShellScript',
+    )
+    client.update_document(
+        Content=MOCK_SSM_DOCUMENT_02,
+        Name='AWS-RunShellScript',
+    )
+    response = client.get_document(
+        Name='AWS-RunShellScript',
+        DocumentVersion='1',
+        DocumentFormat='YAML',
+    )
+    print(response)
+    response.should.be.a(dict)
+    response['Name'].should.equal('AWS-RunShellScript')
+    response['DocumentVersion'].should.equal('1')
+    json.dumps(response['Content']).should.equal(MOCK_SSM_DOCUMENT_01)
+    response['DocumentFormat'].should.be.within(['YAML', 'JSON'])
+    response['DocumentType'].should.be.within(['Command', 'Policy', 'Automation'])
+    #assert False
 
 """
 ssm document features and tests:
     validate creating yaml doc
     set parameters
     set tags
+    figure out about setting PlatformTypes
     DONE list documents
     list documents by filter
     DONE delete doc
-    update doc
-    describe doc by version
-    get doc
-    figure out about setting PlatformTypes
+    DONE update doc
+    DONE describe doc by version
+    DONE list doc versions
+    DONE set doc default version
+    DONE get doc
     DONE figure out about exception handling
-"""
-"""
-{
-    'DocumentVersions': [
-        {
-            'Name': 'string',
-            'DocumentVersion': 'string',
-            'CreatedDate': datetime(2015, 1, 1),
-            'IsDefaultVersion': True|False,
-            'DocumentFormat': 'YAML'|'JSON'
-        },
-    ],
-    'NextToken': 'string'
-}
-
-Command:
-
-   aws ssm list-document-versions --name "patchWindowsAmi"
-
-Output:
-
-   {
-         "DocumentVersions": [
-                 {
-                         "IsDefaultVersion": false,
-                         "Name": "patchWindowsAmi",
-                         "DocumentVersion": "2",
-                         "CreatedDate": 1475799950.484
-                 },
-                 {
-                         "IsDefaultVersion": false,
-                         "Name": "patchWindowsAmi",
-                         "DocumentVersion": "1",
-                         "CreatedDate": 1475799931.064
-                 }
-         ]
-   }
-
+    test exception handling
 """

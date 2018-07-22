@@ -400,21 +400,6 @@ class SimpleSystemManagerBackend(BaseBackend):
         self._documents.append(document)
         return {'DocumentDescription': document.describe()}
 
-    def update_document(self, **kwargs):
-        document = self.get_document_by_name(kwargs['Name'])
-        document_version = DocumentVersion(
-            kwargs['Content'],
-            kwargs.get('DocumentFormat', 'JSON'),
-        )
-        if 'DocumentVersion' in kwargs:
-            version_index = document.index_from_version_str(kwargs['DocumentVersion'])
-            document.document_versions[version_index] = document_version
-        else:
-            document.document_versions.append(document_version)
-        version_str = str(document.document_versions.index(document_version) + 1)
-        print(version_str)
-        return {'DocumentDescription': document.describe(version_str)}
-
     def get_document_by_name(self, name):
         document = next((doc for doc in self._documents if doc.name == name), None)
         if document is None:
@@ -451,6 +436,60 @@ class SimpleSystemManagerBackend(BaseBackend):
             listing = {key: value for key, value in desc.items() if key in listing_keys}
             identifiers.append(listing)
         return {'DocumentIdentifiers': identifiers}
+
+    def update_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document_version = DocumentVersion(
+            kwargs['Content'],
+            kwargs.get('DocumentFormat', 'JSON'),
+        )
+        if 'DocumentVersion' in kwargs:
+            version_index = document.index_from_version_str(kwargs['DocumentVersion'])
+            document.document_versions[version_index] = document_version
+        else:
+            document.document_versions.append(document_version)
+        version_str = str(document.document_versions.index(document_version) + 1)
+        print(version_str)
+        return {'DocumentDescription': document.describe(version_str)}
+
+    def list_document_versions(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        version_descriptions = []
+        for document_version in document.document_versions:
+            version_str = str(document.document_versions.index(document_version) + 1)
+            version_descriptions.append(
+                {
+                    'Name': document.name,
+                    'DocumentVersion': version_str,
+                    'CreatedDate': unix_time(document_version.created_time),
+                    'IsDefaultVersion': (version_str == document.default_version),
+                    'DocumentFormat': document_version.document_format,
+                }
+            )
+        return {'DocumentVersions': version_descriptions}
+
+    def update_document_default_version(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        index = self._documents.index(document)
+        self._documents[index].default_version = kwargs['DocumentVersion']
+        return {
+            'Description': {
+                'Name': self._documents[index].name,
+                'DefaultVersion': self._documents[index].default_version,
+            }
+        }
+
+    def get_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document_version = document.get_version(kwargs.get('DocumentVersion'))
+        version_str = str(document.document_versions.index(document_version) + 1)
+        return {
+            'Name': document.name,
+            'DocumentVersion': version_str,
+            'Content': document_version.content,
+            'DocumentType': document.document_type,
+            'DocumentFormat': document_version.document_format,
+        }
 
 
 ssm_backends = {}
