@@ -235,3 +235,18 @@ class SimpleSystemManagerResponse(BaseResponse):
         return json.dumps(
             self.ssm_backend.list_documents(**self.request_params)
         )
+
+    def list_document_versions(self):
+        return json.dumps(
+            self.ssm_backend.list_document_versions(**self.request_params)
+        )
+
+    def update_document_default_version(self):
+        return json.dumps(
+            self.ssm_backend.update_document_default_version(**self.request_params)
+        )
+
+    def get_document(self):
+        return json.dumps(
+            self.ssm_backend.get_document(**self.request_params)
+        )

@@ -11,7 +11,9 @@ import datetime
 import time
 import uuid
 import json
+import yaml
 import hashlib
+import re
 
 
 class Parameter(BaseModel):
@@ -136,54 +138,109 @@ class Command(BaseModel):
         return r
 
 
+class DocumentVersion(BaseModel):
+    def __init__(self, content, document_format):
+        self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
+        self.created_time = datetime.datetime.utcnow()
+        self.document_format = document_format
+
+        if document_format == 'JSON':
+            self.content = json.loads(content)
+        elif document_format == 'YAML':
+            self.content = yaml.load(content)
+        else:
+            raise RESTError(
+                'ValidationException',
+                "Value '{}' at 'documentFormat' failed to satisfy constraint: "
+                "Member must satisfy enum value set: "
+                "[YAML, JSON]".format(document_format),
+            )
+
+
 FAKE_ACCOUNT_ID = '123456789012'
 
 
 class Document(BaseModel):
-    """
-    response = client.create_document(
-        Content='string',
-        Name='string',
-        DocumentType='Command'|'Policy'|'Automation',
-        DocumentFormat='YAML'|'JSON',
-        TargetType='string'
-    )
-    """
 
-    def __init__(self, content, name, **kwargs):
-        self.content = json.loads(content)
+    def __init__(self, name, document_type, target_type):
         self.name = name
-        self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
-        self.created_time = datetime.datetime.utcnow()
-        self.document_type = kwargs.get('DocumentType', 'Command')
-        self.document_format = kwargs.get('DocumentFormat', 'JSON')
-        self.target_type = kwargs.get('TargetType', '')
         self.owner = FAKE_ACCOUNT_ID
-        self.document_history = [content]
-        self.document_version = 1
-        self.latest_version = 1
-        self.default_version = 1
+        self.default_version = ''
+        self.document_versions = []
 
-    def _describe(self):
-        return {
-            'Hash': self.sha256_digest,
+        if document_type not in ['Command', 'Policy', 'Automation']:
+            raise RESTError(
+                'ValidationException',
+                "Value '{}' at 'documentType' failed to satisfy constraint: "
+                "Member must satisfy enum value set: "
+                "[Command, Policy, Automation]".format(document_type),
+            )
+        self.document_type = document_type
+
+        if target_type is not None:
+            target_type_re = re.compile(r'\/[\w\.\-\:\/]*')
+            if not target_type_re.match(target_type):
+                raise RESTError(
+                    'ValidationException',
+                    "Value '{}' at 'targetType' failed to satisfy constraint: "
+                    "Member must satisfy regular expression pattern: "
+                    "^\/[\w\.\-\:\/]*$".format(target_type),
+                )
+            self.target_type = target_type
+
+    @property
+    def latest_version(self):
+        return str(len(self.document_versions))
+
+    def index_from_version_str(self, version_str):
+        try:
+            return int(version_str) - 1
+        except ValueError:
+            raise RESTError(
+                'ValidationException',
+                "Value '{}' at 'documentVersion' failed to satisfy constraint: "
+                "Member must satisfy regular expression pattern: "
+                "([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$".format(version_str)
+            )
+
+    def get_version(self, version_str):
+        index = self.index_from_version_str(version_str)
+        try:
+            return self.document_versions[index]
+        except IndexError:
+            raise RESTError(
+                'InvalidDocumentVersion',
+                'Document version: {} is invalid for {}, latest version is {}'.format(
+                    version_str,
+                    self.name,
+                    self.lastest_version
+                ))
+
+    def describe(self, version_str=None):
+        if not version_str:
+            version_str = self.default_version
+        document_version = self.get_version(version_str)
+        document_desc = {
+            'Hash': document_version.sha256_digest,
             'HashType': 'Sha256',
             'Name': self.name,
             'Owner': self.owner,
-            'CreatedDate': unix_time(self.created_time),
+            'CreatedDate': unix_time(document_version.created_time),
             'Status': 'Active',
-            'DocumentVersion': str(self.document_version),
-            'Description': self.content['description'],
+            'DocumentVersion': version_str,
+            'Description': document_version.content['description'],
             'Parameters': [],
             'PlatformTypes': ['Linux'],
             'DocumentType': self.document_type,
-            'SchemaVersion': self.content['schemaVersion'],
-            'LatestVersion': str(self.latest_version),
-            'DefaultVersion': str(self.default_version),
-            'DocumentFormat': self.document_format,
-            'TargetType': self.target_type,
+            'SchemaVersion': document_version.content['schemaVersion'],
+            'LatestVersion': self.latest_version,
+            'DefaultVersion': self.default_version,
+            'DocumentFormat': document_version.document_format,
             'Tags': [],
         }
+        if hasattr(self, 'target_type'):
+            document_desc['TargetType'] = self.target_type
+        return document_desc
 
 
 class SimpleSystemManagerBackend(BaseBackend):
@@ -353,9 +410,19 @@ class SimpleSystemManagerBackend(BaseBackend):
             if instance_id in command.instance_ids]
 
     def create_document(self, **kwargs):
-        document = Document(kwargs['Content'], kwargs['Name'], **kwargs)
+        document = Document(
+            kwargs['Name'],
+            kwargs.get('DocumentType', 'Command'),
+            kwargs.get('TargetType'),
+        )
+        document_version = DocumentVersion(
+            kwargs['Content'],
+            kwargs.get('DocumentFormat', 'JSON'),
+        )
+        document.default_version = '1'
+        document.document_versions.append(document_version)
         self._documents.append(document)
-        return {'DocumentDescription': document._describe()}
+        return {'DocumentDescription': document.describe()}
 
     def get_document_by_name(self, name):
         document = next((doc for doc in self._documents if doc.name == name), None)
@@ -368,22 +435,7 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def describe_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
-        return {'Document': document._describe()}
-
-    def update_document(self, **kwargs):
-        document = self.get_document_by_name(kwargs['Name'])
-        document.content = json.loads(kwargs['Content'])
-        document.sha256_digest = hashlib.sha256(kwargs['Content'].encode()).hexdigest()
-        if 'DocumentFormat' in kwargs:
-            document.document_format = kwargs('DocumentFormat')
-        if 'TargetType' in kwargs:
-            document.target_type = kwargs('TargetType')
-        #if 'DocumentVersion' in kwargs:
-        #    version = kwargs['DocumentVersion']
-        document.document_version += 1
-        document.latest_version += 1
-        document.document_history.append(kwargs['Content'])
-        return {'DocumentDescription': document._describe()}
+        return {'Document': document.describe(kwargs.get('DocumentVersion'))}
 
     def delete_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
@@ -404,10 +456,64 @@ class SimpleSystemManagerBackend(BaseBackend):
             'Tags',
         ]
         for document in self._documents:
-            desc = document._describe()
+            desc = document.describe()
             listing = {key: value for key, value in desc.items() if key in listing_keys}
             identifiers.append(listing)
         return {'DocumentIdentifiers': identifiers}
+
+    def update_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document_version = DocumentVersion(
+            kwargs['Content'],
+            kwargs.get('DocumentFormat', 'JSON'),
+        )
+        if 'DocumentVersion' in kwargs:
+            version_index = document.index_from_version_str(kwargs['DocumentVersion'])
+            document.document_versions[version_index] = document_version
+        else:
+            document.document_versions.append(document_version)
+        version_str = str(document.document_versions.index(document_version) + 1)
+        print(version_str)
+        return {'DocumentDescription': document.describe(version_str)}
+
+    def list_document_versions(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        version_descriptions = []
+        for document_version in document.document_versions:
+            version_str = str(document.document_versions.index(document_version) + 1)
+            version_descriptions.append(
+                {
+                    'Name': document.name,
+                    'DocumentVersion': version_str,
+                    'CreatedDate': unix_time(document_version.created_time),
+                    'IsDefaultVersion': (version_str == document.default_version),
+                    'DocumentFormat': document_version.document_format,
+                }
+            )
+        return {'DocumentVersions': version_descriptions}
+
+    def update_document_default_version(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        index = self._documents.index(document)
+        self._documents[index].default_version = kwargs['DocumentVersion']
+        return {
+            'Description': {
+                'Name': self._documents[index].name,
+                'DefaultVersion': self._documents[index].default_version,
+            }
+        }
+
+    def get_document(self, **kwargs):
+        document = self.get_document_by_name(kwargs['Name'])
+        document_version = document.get_version(kwargs.get('DocumentVersion'))
+        version_str = str(document.document_versions.index(document_version) + 1)
+        return {
+            'Name': document.name,
+            'DocumentVersion': version_str,
+            'Content': document_version.content,
+            'DocumentType': document.document_type,
+            'DocumentFormat': document_version.document_format,
+        }
 
 
 ssm_backends = {}
