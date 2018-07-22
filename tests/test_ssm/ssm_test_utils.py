@@ -4,18 +4,19 @@ import sure   # noqa
 import datetime
 import hashlib
 import json
+import yaml
 import six
 
 from moto.ssm.models import FAKE_ACCOUNT_ID
 
-MOCK_SSM_DOCUMENT_01 = json.dumps(dict(
+MOCK_SSM_DOCUMENT = dict(
     schemaVersion='2.2',
     description='Mock SSM Document',
     parameters=dict(),
     mainSteps=[
         dict(
             action='aws:runShellScript',
-            name='AWS-RunShellScript',
+            name='RunMockShellScript',
             inputs=dict(
                 runCommandand=[
                     'echo "hello world',
@@ -23,57 +24,43 @@ MOCK_SSM_DOCUMENT_01 = json.dumps(dict(
             )
         )
     ]
-))
+)
 
-MOCK_SSM_DOCUMENT_02 = json.dumps(dict(
-    schemaVersion='2.2',
-    description='An Updated Mock SSM Document',
-    parameters=dict(),
-    mainSteps=[
-        dict(
-            action='aws:runShellScript',
-            name='AWS-RunShellScript',
-            inputs=dict(
-                runCommandand=[
-                    'echo "hello world from updated ssm document',
-                ]
-            )
-        )
-    ]
-))
 
-def validate_ssm_document_description(doc):
-    doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT_01.encode()).hexdigest())
-    doc['HashType'].should.equal('Sha256')
-    doc['Name'].should.equal('AWS-RunShellScript')
-    doc['Owner'].should.equal(FAKE_ACCOUNT_ID)
-    doc['CreatedDate'].should.be.a(datetime.datetime)
-    doc['Status'].should.equal('Active')
-    doc['DocumentVersion'].should.equal('1')
-    doc['Description'].should.equal('Mock SSM Document')
-    doc['Parameters'].should.be.a(list)
-    doc['PlatformTypes'].should.be.a(list)
-    doc['PlatformTypes'][0].should.equal('Linux')
-    doc['DocumentType'].should.equal('Command')
-    doc['SchemaVersion'].should.equal('2.2')
-    doc['LatestVersion'].should.equal('1')
-    doc['DefaultVersion'].should.equal('1')
-    doc['DocumentFormat'].should.equal('JSON')
-    doc['TargetType'].should.equal('/AWS::EC2::Instance')
-    doc['Tags'].should.be.a(list)
-
-def validate_ssm_document_listing(doc):
+def validate_document_listing(doc, content):
     doc['Name'].should.be.a(six.string_types)
     doc['Owner'].should.equal(FAKE_ACCOUNT_ID)
-    doc['DocumentVersion'].should.be.a(six.string_types)
+    doc['DocumentVersion'].should.match(r'[1-9][0-9]*')
     doc['PlatformTypes'].should.be.a(list)
-    #doc['PlatformTypes'][0].should.equal('Linux')
+    for platform_type in doc['PlatformTypes']:
+        platform_type.should.be.within(['Linux', 'Windows'])
     doc['DocumentType'].should.be.within(['Command', 'Policy', 'Automation'])
-    doc['SchemaVersion'].should.be.a(six.string_types)
+    doc['SchemaVersion'].should.equal(content['schemaVersion'])
     doc['DocumentFormat'].should.be.within(['JSON', 'YAML'])
-    #doc['TargetType'].should.equal('/AWS::EC2::Instance')
-    doc['TargetType'].should.be.a(six.string_types)
+    if 'TargetType' in doc:
+        doc['TargetType'].should.match(r'\/[\w\.\-\:\/]*')
     doc['Tags'].should.be.a(list)
+
+
+def validate_document_hash(doc, content):
+    if doc['DocumentFormat'] == 'JSON':
+        content = json.dumps(content)
+    else:
+        content = yaml.dump(content)
+    doc['Hash'].should.equal(hashlib.sha256(content.encode()).hexdigest())
+
+    
+def validate_document_description(doc, content):
+    validate_document_hash(doc, content)
+    validate_document_listing(doc, content)
+    doc['HashType'].should.equal('Sha256')
+    doc['CreatedDate'].should.be.a(datetime.datetime)
+    doc['Status'].should.equal('Active')
+    doc['Description'].should.equal(content['description'])
+    doc['Parameters'].should.be.a(list)
+    doc['LatestVersion'].should.match(r'[1-9][0-9]*')
+    doc['DefaultVersion'].should.match(r'[1-9][0-9]*')
+
 
 """
 {
@@ -107,7 +94,7 @@ def validate_ssm_document_listing(doc):
         "Hash": "5266528174f8987024c43a820d0d1f16d5905f68945397765ac4ff3023e7a0df",
         "HashType": "Sha256",
         "Name": "sshPubkeySetup",
-        "Owner": "071826132890",
+        "Owner": "XXXXXXXXXXXXXXXX",
         "CreatedDate": 1531949537.294,
         "Status": "Active",
         "DocumentVersion": "1",

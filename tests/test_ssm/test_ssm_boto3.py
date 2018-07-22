@@ -6,6 +6,7 @@ import sure   # noqa
 import datetime
 import uuid
 import json
+import yaml
 import hashlib
 
 from botocore.exceptions import ClientError
@@ -13,10 +14,10 @@ from nose.tools import assert_raises
 
 from moto import mock_ssm
 from .ssm_test_utils import (
-    MOCK_SSM_DOCUMENT_01,
-    MOCK_SSM_DOCUMENT_02,
-    validate_ssm_document_description,
-    validate_ssm_document_listing,
+    MOCK_SSM_DOCUMENT,
+    validate_document_hash,
+    validate_document_description,
+    validate_document_listing,
 )
 
 
@@ -678,27 +679,51 @@ def test_list_commands():
             CommandId=str(uuid.uuid4()))
 
 
+# SSM Documents Support
+
+
 @mock_ssm
 def test_create_document():
     client = boto3.client('ssm', region_name='us-east-1')
+
+    # JSON format
     response = client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
         Name='AWS-RunShellScript',
         DocumentType='Command',
         DocumentFormat='JSON',
         TargetType='/AWS::EC2::Instance',
     )
-    #print(response)
     response.should.have.key('DocumentDescription')
-    validate_ssm_document_description(response['DocumentDescription'])
-    #assert False
+    doc = response['DocumentDescription']
+    validate_document_description(doc, MOCK_SSM_DOCUMENT)
+    doc['Name'].should.equal('AWS-RunShellScript')
+    doc['DocumentType'].should.equal('Command')
+    doc['DocumentFormat'].should.equal('JSON')
+    doc['TargetType'].should.equal('/AWS::EC2::Instance')
+    doc['DocumentVersion'].should.equal('1')
+    doc['LatestVersion'].should.equal('1')
+    doc['DefaultVersion'].should.equal('1')
+
+    # YAML format
+    response = client.create_document(
+        Content=yaml.dump(MOCK_SSM_DOCUMENT),
+        Name='AWS-RunShellScript',
+        DocumentFormat='YAML',
+        TargetType='/',
+    )
+    response.should.have.key('DocumentDescription')
+    doc = response['DocumentDescription']
+    validate_document_description(doc, MOCK_SSM_DOCUMENT)
+    doc['DocumentFormat'].should.equal('YAML')
+    doc['TargetType'].should.equal('/')
 
 
 @mock_ssm
 def test_describe_document():
     client = boto3.client('ssm', region_name='us-east-1')
     client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
         Name='AWS-RunShellScript',
         DocumentType='Command',
         DocumentFormat='JSON',
@@ -708,32 +733,30 @@ def test_describe_document():
         Name='AWS-RunShellScript',
         DocumentVersion='1',
     )
-    #print(response)
     response.should.have.key('Document')
-    validate_ssm_document_description(response['Document'])
-    #assert False
+    validate_document_description(response['Document'], MOCK_SSM_DOCUMENT)
 
 
 @mock_ssm
 def test_list_documents():
     client = boto3.client('ssm', region_name='us-east-1')
     client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
         Name='AWS-RunShellScript-01',
     )
     client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
         Name='AWS-RunShellScript-02',
     )
     client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
         Name='AWS-RunShellScript-03',
     )
     response = client.list_documents()
-    #print(response)
+    print(response)
     response.should.have.key('DocumentIdentifiers')
     for doc in response['DocumentIdentifiers']:
-        validate_ssm_document_listing(doc)
+        validate_document_listing(doc, MOCK_SSM_DOCUMENT)
     #assert False
 
 
@@ -741,7 +764,7 @@ def test_list_documents():
 def test_delete_document():
     client = boto3.client('ssm', region_name='us-east-1')
     client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
         Name='AWS-RunShellScript',
     )
     response = client.delete_document(
@@ -761,19 +784,21 @@ def test_delete_document():
 @mock_ssm
 def test_update_document():
     client = boto3.client('ssm', region_name='us-east-1')
+    content = MOCK_SSM_DOCUMENT
     response01 = client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
+        Content=json.dumps(content),
         Name='AWS-RunShellScript',
     )
     print(response01)
+    content['description'] = 'An Updated Mock SSM Document'
     response02 = client.update_document(
-        Content=MOCK_SSM_DOCUMENT_02,
+        Content=json.dumps(content),
         Name='AWS-RunShellScript',
     )
     print(response02)
     response02.should.have.key('DocumentDescription')
     doc = response02['DocumentDescription']
-    doc['Hash'].should.equal(hashlib.sha256(MOCK_SSM_DOCUMENT_02.encode()).hexdigest())
+    validate_document_hash(doc, content)
     doc['Name'].should.equal('AWS-RunShellScript')
     doc['DocumentVersion'].should.equal('2')
     doc['Description'].should.equal('An Updated Mock SSM Document')
@@ -782,17 +807,23 @@ def test_update_document():
     #assert False
 
 
+def setup_document_version_test(client):
+    content = MOCK_SSM_DOCUMENT
+    client.create_document(
+        Content=json.dumps(content),
+        Name='AWS-RunShellScript',
+    )
+    content['description'] = 'An Updated Mock SSM Document'
+    response = client.update_document(
+        Content=json.dumps(content),
+        Name='AWS-RunShellScript',
+    )
+
+
 @mock_ssm
 def test_list_document_versions():
     client = boto3.client('ssm', region_name='us-east-1')
-    client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
-        Name='AWS-RunShellScript',
-    )
-    client.update_document(
-        Content=MOCK_SSM_DOCUMENT_02,
-        Name='AWS-RunShellScript',
-    )
+    setup_document_version_test(client)
     response = client.list_document_versions(
         Name='AWS-RunShellScript',
     )
@@ -812,14 +843,7 @@ def test_list_document_versions():
 @mock_ssm
 def test_update_document_default_version():
     client = boto3.client('ssm', region_name='us-east-1')
-    client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
-        Name='AWS-RunShellScript',
-    )
-    client.update_document(
-        Content=MOCK_SSM_DOCUMENT_02,
-        Name='AWS-RunShellScript',
-    )
+    setup_document_version_test(client)
     response = client.update_document_default_version(
         Name='AWS-RunShellScript',
         DocumentVersion='2'
@@ -836,17 +860,11 @@ def test_update_document_default_version():
     response['DocumentVersions'][1]['IsDefaultVersion'].should.be.true
     #assert False
 
+
 @mock_ssm
 def test_get_document():
     client = boto3.client('ssm', region_name='us-east-1')
-    client.create_document(
-        Content=MOCK_SSM_DOCUMENT_01,
-        Name='AWS-RunShellScript',
-    )
-    client.update_document(
-        Content=MOCK_SSM_DOCUMENT_02,
-        Name='AWS-RunShellScript',
-    )
+    setup_document_version_test(client)
     response = client.get_document(
         Name='AWS-RunShellScript',
         DocumentVersion='1',
@@ -856,17 +874,17 @@ def test_get_document():
     response.should.be.a(dict)
     response['Name'].should.equal('AWS-RunShellScript')
     response['DocumentVersion'].should.equal('1')
-    json.dumps(response['Content']).should.equal(MOCK_SSM_DOCUMENT_01)
+    json.dumps(response['Content']).should.equal(json.dumps(MOCK_SSM_DOCUMENT))
     response['DocumentFormat'].should.be.within(['YAML', 'JSON'])
     response['DocumentType'].should.be.within(['Command', 'Policy', 'Automation'])
     #assert False
 
 """
 ssm document features and tests:
-    validate creating yaml doc
+    DONE validate creating yaml doc
     set parameters
     set tags
-    figure out about setting PlatformTypes
+    DONE figure out about setting PlatformTypes
     DONE list documents
     list documents by filter
     DONE delete doc
@@ -877,4 +895,20 @@ ssm document features and tests:
     DONE get doc
     DONE figure out about exception handling
     test exception handling
+
+def test_create_document_bad_input():
+    client = boto3.client('ssm', region_name='us-east-1')
+    response = client.create_document(
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
+        Name='MockSSMDocument',
+        DocumentType='Command',
+        #DocumentFormat='JSON',
+        #TargetType='/AWS::EC2::Instance',
+        #TargetType='',
+    )
+    print(response)
+    response = client.delete_document(
+        Name='MockSSMDocument',
+    )
+    assert False
 """

@@ -11,7 +11,9 @@ import datetime
 import time
 import uuid
 import json
+import yaml
 import hashlib
+import re
 
 
 class Parameter(BaseModel):
@@ -136,12 +138,23 @@ class Command(BaseModel):
         return r
 
 
-class DocumentVersion(object):
+class DocumentVersion(BaseModel):
     def __init__(self, content, document_format):
-        self.content = json.loads(content)
         self.sha256_digest = hashlib.sha256(content.encode()).hexdigest()
         self.created_time = datetime.datetime.utcnow()
         self.document_format = document_format
+
+        if document_format == 'JSON':
+            self.content = json.loads(content)
+        elif document_format == 'YAML':
+            self.content = yaml.load(content)
+        else:
+            raise RESTError(
+                'ValidationException',
+                "Value '{}' at 'documentFormat' failed to satisfy constraint: "
+                "Member must satisfy enum value set: "
+                "[YAML, JSON]".format(document_format),
+            )
 
 
 FAKE_ACCOUNT_ID = '123456789012'
@@ -151,20 +164,30 @@ class Document(BaseModel):
 
     def __init__(self, name, document_type, target_type):
         self.name = name
-        self.document_type = document_type
-        self.target_type = target_type
         self.owner = FAKE_ACCOUNT_ID
         self.default_version = ''
         self.document_versions = []
 
-    # TODO: self.document_versions magically sorted
-    #    def date_key(a):
-    #        """
-    #        a: date as string
-    #        """
-    #        a = datetime.datetime.strptime(a, '%d.%m.%Y').date()
-    #        return a
-    #    sorted_dates = sorted(sorted_dates, key=date_key)
+        if document_type not in ['Command', 'Policy', 'Automation']:
+            raise RESTError(
+                'ValidationException',
+                "Value '{}' at 'documentType' failed to satisfy constraint: "
+                "Member must satisfy enum value set: "
+                "[Command, Policy, Automation]".format(document_type),
+            )
+        self.document_type = document_type
+
+        if target_type is not None:
+            target_type_re = re.compile(r'\/[\w\.\-\:\/]*')
+            if not target_type_re.match(target_type):
+                raise RESTError(
+                    'ValidationException',
+                    "Value '{}' at 'targetType' failed to satisfy constraint: "
+                    "Member must satisfy regular expression pattern: "
+                    "^\/[\w\.\-\:\/]*$".format(target_type),
+                )
+            self.target_type = target_type
+
     @property
     def latest_version(self):
         return str(len(self.document_versions))
@@ -175,9 +198,10 @@ class Document(BaseModel):
         except ValueError:
             raise RESTError(
                 'ValidationException',
-                "Value '{}' at 'documentVersion' failed to satisfy constraint: Member must satisfy regular expression pattern: ([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$".format(
-                    version_str
-                ))
+                "Value '{}' at 'documentVersion' failed to satisfy constraint: "
+                "Member must satisfy regular expression pattern: "
+                "([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$".format(version_str)
+            )
 
     def get_version(self, version_str):
         index = self.index_from_version_str(version_str)
@@ -196,7 +220,7 @@ class Document(BaseModel):
         if not version_str:
             version_str = self.default_version
         document_version = self.get_version(version_str)
-        return {
+        document_desc = {
             'Hash': document_version.sha256_digest,
             'HashType': 'Sha256',
             'Name': self.name,
@@ -212,9 +236,11 @@ class Document(BaseModel):
             'LatestVersion': self.latest_version,
             'DefaultVersion': self.default_version,
             'DocumentFormat': document_version.document_format,
-            'TargetType': self.target_type,
             'Tags': [],
         }
+        if hasattr(self, 'target_type'):
+            document_desc['TargetType'] = self.target_type
+        return document_desc
 
 
 class SimpleSystemManagerBackend(BaseBackend):
@@ -384,13 +410,11 @@ class SimpleSystemManagerBackend(BaseBackend):
             if instance_id in command.instance_ids]
 
     def create_document(self, **kwargs):
-        # TODO: DocumentType='Command'|'Policy'|'Automation'
         document = Document(
             kwargs['Name'],
             kwargs.get('DocumentType', 'Command'),
-            kwargs.get('TargetType', ''),
+            kwargs.get('TargetType'),
         )
-        # TODO: DocumentFormat='YAML'|'JSON'
         document_version = DocumentVersion(
             kwargs['Content'],
             kwargs.get('DocumentFormat', 'JSON'),
