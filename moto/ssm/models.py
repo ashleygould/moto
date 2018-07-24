@@ -216,6 +216,19 @@ class Document(BaseModel):
                     self.lastest_version
                 ))
 
+    def _format_parameters(self, document_content):
+        if 'parameters' not in document_content:
+            return []
+        formated_params = []
+        for name, attributes in document_content['parameters'].items():
+            param = dict(Name=name)
+            for key, value in attributes.items():
+                # capitalize key name without loosing camelcase
+                key = key[0].upper() + key[1:]
+                param[key] = value
+            formated_params.append(param)
+        return formated_params
+
     def describe(self, version_str=None):
         if not version_str:
             version_str = self.default_version
@@ -229,7 +242,7 @@ class Document(BaseModel):
             'Status': 'Active',
             'DocumentVersion': version_str,
             'Description': document_version.content['description'],
-            'Parameters': [],
+            'Parameters': self._format_parameters(document_version.content),
             'PlatformTypes': ['Linux'],
             'DocumentType': self.document_type,
             'SchemaVersion': document_version.content['schemaVersion'],
@@ -435,7 +448,13 @@ class SimpleSystemManagerBackend(BaseBackend):
 
     def describe_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
-        return {'Document': document.describe(kwargs.get('DocumentVersion'))}
+        document_description = document.describe(kwargs.get('DocumentVersion'))
+        tags = self.list_tags_for_resource('Document', document.name)
+        if tags:
+            document_description['Tags'] = [
+                {'Key': k, 'Value': v} for (k, v) in tags.items()
+            ]
+        return {'Document': document_description}
 
     def delete_document(self, **kwargs):
         document = self.get_document_by_name(kwargs['Name'])
@@ -473,7 +492,6 @@ class SimpleSystemManagerBackend(BaseBackend):
         else:
             document.document_versions.append(document_version)
         version_str = str(document.document_versions.index(document_version) + 1)
-        print(version_str)
         return {'DocumentDescription': document.describe(version_str)}
 
     def list_document_versions(self, **kwargs):
