@@ -12,7 +12,21 @@ from moto.ssm.models import FAKE_ACCOUNT_ID
 MOCK_SSM_DOCUMENT = dict(
     schemaVersion='2.2',
     description='Mock SSM Document',
-    parameters=dict(),
+    #parameters=dict(),
+    parameters={
+        'param1': {
+            'description': 'body parts',
+            'type': 'String',
+            'allowedValues': ['spleen', 'heart'],
+            'default': 'organ',
+        },
+        'param2': {
+            'description': 'body parts',
+            'type': 'String',
+            'allowedValues': ['spleen', 'heart'],
+            'default': 'spleen',
+        }
+    },
     mainSteps=[
         dict(
             action='aws:runShellScript',
@@ -62,54 +76,14 @@ def validate_document_description(doc, content):
     doc['DefaultVersion'].should.match(r'[1-9][0-9]*')
 
 
-"""
-{
-    'DocumentIdentifiers': [
-        {
-            'Name': 'string',
-            'Owner': 'string',
-            'PlatformTypes': [
-                'Windows'|'Linux',
-            ],
-            'DocumentVersion': 'string',
-            'DocumentType': 'Command'|'Policy'|'Automation',
-            'SchemaVersion': 'string',
-            'DocumentFormat': 'YAML'|'JSON',
-            'TargetType': 'string',
-            'Tags': [
-                {
-                    'Key': 'string',
-                    'Value': 'string'
-                },
-            ]
-        },
-    ],
-    'NextToken': 'string'
-}
-"""
-
-"""
-{
-    "Document": {
-        "Hash": "5266528174f8987024c43a820d0d1f16d5905f68945397765ac4ff3023e7a0df",
-        "HashType": "Sha256",
-        "Name": "sshPubkeySetup",
-        "Owner": "XXXXXXXXXXXXXXXX",
-        "CreatedDate": 1531949537.294,
-        "Status": "Active",
-        "DocumentVersion": "1",
-        "Description": "Install ssh public key into ~ec2-user/.ssh/authorized_keys",
-        "Parameters": [],
-        "PlatformTypes": [
-            "Linux"
-        ],
-        "DocumentType": "Command",
-        "SchemaVersion": "2.2",
-        "LatestVersion": "1",
-        "DefaultVersion": "1",
-        "DocumentFormat": "YAML",
-        "TargetType": "/AWS::EC2::Instance",
-        "Tags": []
-    }
-}
-"""
+def setup_document_version_mock_env(client):
+    client.create_document(
+        Content=json.dumps(MOCK_SSM_DOCUMENT),
+        Name='MockSSMDocument',
+    )
+    new_content = dict()
+    new_content.update(MOCK_SSM_DOCUMENT, description='An Updated Mock SSM Document' )
+    response = client.update_document(
+        Content=json.dumps(new_content),
+        Name='MockSSMDocument',
+    )

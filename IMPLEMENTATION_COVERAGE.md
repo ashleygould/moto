@@ -3990,13 +3990,13 @@
 - [ ] create_activation
 - [ ] create_association
 - [ ] create_association_batch
-- [ ] create_document
+- [X] create_document
 - [ ] create_maintenance_window
 - [ ] create_patch_baseline
 - [ ] create_resource_data_sync
 - [ ] delete_activation
 - [ ] delete_association
-- [ ] delete_document
+- [X] delete_document
 - [ ] delete_inventory
 - [ ] delete_maintenance_window
 - [X] delete_parameter
@@ -4012,7 +4012,7 @@
 - [ ] describe_automation_executions
 - [ ] describe_automation_step_executions
 - [ ] describe_available_patches
-- [ ] describe_document
+- [X] describe_document
 - [ ] describe_document_permission
 - [ ] describe_effective_instance_associations
 - [ ] describe_effective_patches_for_patch_baseline
@@ -4036,7 +4036,7 @@
 - [ ] get_command_invocation
 - [ ] get_default_patch_baseline
 - [ ] get_deployable_patch_snapshot_for_instance
-- [ ] get_document
+- [X] get_document
 - [ ] get_inventory
 - [ ] get_inventory_schema
 - [ ] get_maintenance_window
@@ -4056,8 +4056,8 @@
 - [ ] list_commands
 - [ ] list_compliance_items
 - [ ] list_compliance_summaries
-- [ ] list_document_versions
-- [ ] list_documents
+- [X] list_document_versions
+- [X] list_documents
 - [ ] list_inventory_entries
 - [ ] list_resource_compliance_summaries
 - [ ] list_resource_data_sync
@@ -4077,8 +4077,8 @@
 - [ ] stop_automation_execution
 - [ ] update_association
 - [ ] update_association_status
-- [ ] update_document
-- [ ] update_document_default_version
+- [X] update_document
+- [X] update_document_default_version
 - [ ] update_maintenance_window
 - [ ] update_maintenance_window_target
 - [ ] update_maintenance_window_task
