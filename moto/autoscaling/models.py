@@ -1,5 +1,10 @@
 from __future__ import unicode_literals
+
+import random
+
 from boto.ec2.blockdevicemapping import BlockDeviceType, BlockDeviceMapping
+from moto.ec2.exceptions import InvalidInstanceIdError
+
 from moto.compat import OrderedDict
 from moto.core import BaseBackend, BaseModel
 from moto.ec2 import ec2_backends
@@ -7,7 +12,7 @@ from moto.elb import elb_backends
 from moto.elbv2 import elbv2_backends
 from moto.elb.exceptions import LoadBalancerNotFoundError
 from .exceptions import (
-    AutoscalingClientError, ResourceContentionError,
+    AutoscalingClientError, ResourceContentionError, InvalidInstanceError
 )
 
 # http://docs.aws.amazon.com/AutoScaling/latest/DeveloperGuide/AS_Concepts.html#Cooldown
@@ -69,6 +74,26 @@ class FakeLaunchConfiguration(BaseModel):
         self.ebs_optimized = ebs_optimized
         self.associate_public_ip_address = associate_public_ip_address
         self.block_device_mapping_dict = block_device_mapping_dict
+
+    @classmethod
+    def create_from_instance(cls, name, instance, backend):
+        config = backend.create_launch_configuration(
+            name=name,
+            image_id=instance.image_id,
+            kernel_id='',
+            ramdisk_id='',
+            key_name=instance.key_name,
+            security_groups=instance.security_groups,
+            user_data=instance.user_data,
+            instance_type=instance.instance_type,
+            instance_monitoring=False,
+            instance_profile_name=None,
+            spot_price=None,
+            ebs_optimized=instance.ebs_optimized,
+            associate_public_ip_address=instance.associate_public_ip,
+            block_device_mappings=instance.block_device_mapping
+        )
+        return config
 
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
@@ -159,13 +184,7 @@ class FakeAutoScalingGroup(BaseModel):
         self.autoscaling_backend = autoscaling_backend
         self.name = name
 
-        if not availability_zones and not vpc_zone_identifier:
-            raise AutoscalingClientError(
-                "ValidationError",
-                "At least one Availability Zone or VPC Subnet is required."
-            )
-        self.availability_zones = availability_zones
-        self.vpc_zone_identifier = vpc_zone_identifier
+        self._set_azs_and_vpcs(availability_zones, vpc_zone_identifier)
 
         self.max_size = max_size
         self.min_size = min_size
@@ -187,6 +206,35 @@ class FakeAutoScalingGroup(BaseModel):
         self.instance_states = []
         self.tags = tags if tags else []
         self.set_desired_capacity(desired_capacity)
+
+    def _set_azs_and_vpcs(self, availability_zones, vpc_zone_identifier, update=False):
+        # for updates, if only AZs are provided, they must not clash with
+        # the AZs of existing VPCs
+        if update and availability_zones and not vpc_zone_identifier:
+            vpc_zone_identifier = self.vpc_zone_identifier
+
+        if vpc_zone_identifier:
+            # extract azs for vpcs
+            subnet_ids = vpc_zone_identifier.split(',')
+            subnets = self.autoscaling_backend.ec2_backend.get_all_subnets(subnet_ids=subnet_ids)
+            vpc_zones = [subnet.availability_zone for subnet in subnets]
+
+            if availability_zones and set(availability_zones) != set(vpc_zones):
+                raise AutoscalingClientError(
+                    "ValidationError",
+                    "The availability zones of the specified subnets and the Auto Scaling group do not match",
+                )
+            availability_zones = vpc_zones
+        elif not availability_zones:
+            if not update:
+                raise AutoscalingClientError(
+                    "ValidationError",
+                    "At least one Availability Zone or VPC Subnet is required."
+                )
+            return
+
+        self.availability_zones = availability_zones
+        self.vpc_zone_identifier = vpc_zone_identifier
 
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
@@ -246,19 +294,23 @@ class FakeAutoScalingGroup(BaseModel):
                health_check_period, health_check_type,
                placement_group, termination_policies,
                new_instances_protected_from_scale_in=None):
-        if availability_zones:
-            self.availability_zones = availability_zones
+        self._set_azs_and_vpcs(availability_zones, vpc_zone_identifier, update=True)
+
         if max_size is not None:
             self.max_size = max_size
         if min_size is not None:
             self.min_size = min_size
 
+        if desired_capacity is None:
+            if min_size is not None and min_size > len(self.instance_states):
+                desired_capacity = min_size
+            if max_size is not None and max_size < len(self.instance_states):
+                desired_capacity = max_size
+
         if launch_config_name:
             self.launch_config = self.autoscaling_backend.launch_configurations[
                 launch_config_name]
             self.launch_config_name = launch_config_name
-        if vpc_zone_identifier is not None:
-            self.vpc_zone_identifier = vpc_zone_identifier
         if health_check_period is not None:
             self.health_check_period = health_check_period
         if health_check_type is not None:
@@ -319,7 +371,8 @@ class FakeAutoScalingGroup(BaseModel):
             self.launch_config.user_data,
             self.launch_config.security_groups,
             instance_type=self.launch_config.instance_type,
-            tags={'instance': propagated_tags}
+            tags={'instance': propagated_tags},
+            placement=random.choice(self.availability_zones),
         )
         for instance in reservation.instances:
             instance.autoscaling_group = self
@@ -389,7 +442,8 @@ class AutoScalingBackend(BaseBackend):
                                  health_check_type, load_balancers,
                                  target_group_arns, placement_group,
                                  termination_policies, tags,
-                                 new_instances_protected_from_scale_in=False):
+                                 new_instances_protected_from_scale_in=False,
+                                  instance_id=None):
 
         def make_int(value):
             return int(value) if value is not None else value
@@ -402,6 +456,13 @@ class AutoScalingBackend(BaseBackend):
             health_check_period = 300
         else:
             health_check_period = make_int(health_check_period)
+        if launch_config_name is None and instance_id is not None:
+            try:
+                instance = self.ec2_backend.get_instance(instance_id)
+                launch_config_name = name
+                FakeLaunchConfiguration.create_from_instance(launch_config_name, instance, self)
+            except InvalidInstanceIdError:
+                raise InvalidInstanceError(instance_id)
 
         group = FakeAutoScalingGroup(
             name=name,
@@ -658,6 +719,18 @@ class AutoScalingBackend(BaseBackend):
             x for x in group.instance_states if x.instance.id in instance_ids]
         for instance in protected_instances:
             instance.protected_from_scale_in = protected_from_scale_in
+
+    def notify_terminate_instances(self, instance_ids):
+        for autoscaling_group_name, autoscaling_group in self.autoscaling_groups.items():
+            original_instance_count = len(autoscaling_group.instance_states)
+            autoscaling_group.instance_states = list(filter(
+                lambda i_state: i_state.instance.id not in instance_ids,
+                autoscaling_group.instance_states
+            ))
+            difference = original_instance_count - len(autoscaling_group.instance_states)
+            if difference > 0:
+                autoscaling_group.replace_autoscaling_group_instances(difference, autoscaling_group.get_propagated_tags())
+                self.update_attached_elbs(autoscaling_group_name)
 
 
 autoscaling_backends = {}

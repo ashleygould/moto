@@ -639,7 +639,7 @@ def test_delete_keys():
 
 
 @mock_s3_deprecated
-def test_delete_keys_with_invalid():
+def test_delete_keys_invalid():
     conn = boto.connect_s3('the_key', 'the_secret')
     bucket = conn.create_bucket('foobar')
 
@@ -648,6 +648,7 @@ def test_delete_keys_with_invalid():
     Key(bucket=bucket, name='file3').set_contents_from_string('abc')
     Key(bucket=bucket, name='file4').set_contents_from_string('abc')
 
+    # non-existing key case
     result = bucket.delete_keys(['abc', 'file3'])
 
     result.deleted.should.have.length_of(1)
@@ -655,6 +656,18 @@ def test_delete_keys_with_invalid():
     keys = bucket.get_all_keys()
     keys.should.have.length_of(3)
     keys[0].name.should.equal('file1')
+
+    # empty keys
+    result = bucket.delete_keys([])
+
+    result.deleted.should.have.length_of(0)
+    result.errors.should.have.length_of(0)
+
+@mock_s3
+def test_boto3_delete_empty_keys_list():
+    with assert_raises(ClientError) as err:
+        boto3.client('s3').delete_objects(Bucket='foobar', Delete={'Objects': []})
+    assert err.exception.response["Error"]["Code"] == "MalformedXML"
 
 
 @mock_s3_deprecated
@@ -1529,6 +1542,28 @@ def test_boto3_copy_object_with_versioning():
     # Version should be different to previous version
     obj2_version_new.should_not.equal(obj2_version)
 
+    client.copy_object(CopySource={'Bucket': 'blah', 'Key': 'test2', 'VersionId': obj2_version}, Bucket='blah', Key='test3')
+    obj3_version_new = client.get_object(Bucket='blah', Key='test3')['VersionId']
+    obj3_version_new.should_not.equal(obj2_version_new)
+
+    # Copy file that doesn't exist
+    with assert_raises(ClientError) as e:
+        client.copy_object(CopySource={'Bucket': 'blah', 'Key': 'test4', 'VersionId': obj2_version}, Bucket='blah', Key='test5')
+    e.exception.response['Error']['Code'].should.equal('404')
+
+    response = client.create_multipart_upload(Bucket='blah', Key='test4')
+    upload_id = response['UploadId']
+    response = client.upload_part_copy(Bucket='blah', Key='test4', CopySource={'Bucket': 'blah', 'Key': 'test3', 'VersionId': obj3_version_new},
+                                       UploadId=upload_id, PartNumber=1)
+    etag = response["CopyPartResult"]["ETag"]
+    client.complete_multipart_upload(
+        Bucket='blah', Key='test4', UploadId=upload_id,
+        MultipartUpload={'Parts': [{'ETag': etag, 'PartNumber': 1}]})
+
+    response = client.get_object(Bucket='blah', Key='test4')
+    data = response["Body"].read()
+    data.should.equal(b'test2')
+
 
 @mock_s3
 def test_boto3_copy_object_from_unversioned_to_versioned_bucket():
@@ -1574,6 +1609,28 @@ def test_boto3_delete_versioned_bucket():
 
     client.delete_bucket(Bucket='blah')
 
+@mock_s3
+def test_boto3_get_object_if_modified_since():
+    s3 = boto3.client('s3', region_name='us-east-1')
+    bucket_name = "blah"
+    s3.create_bucket(Bucket=bucket_name)
+
+    key = 'hello.txt'
+
+    s3.put_object(
+        Bucket=bucket_name,
+        Key=key,
+        Body='test'
+    )
+
+    with assert_raises(botocore.exceptions.ClientError) as err:
+        s3.get_object(
+            Bucket=bucket_name,
+            Key=key,
+            IfModifiedSince=datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        )
+    e = err.exception
+    e.response['Error'].should.equal({'Code': '304', 'Message': 'Not Modified'})
 
 @mock_s3
 def test_boto3_head_object_if_modified_since():
@@ -1625,6 +1682,42 @@ def test_boto3_multipart_etag():
     # we should get both parts as the key contents
     resp = s3.get_object(Bucket='mybucket', Key='the-key')
     resp['ETag'].should.equal(EXPECTED_ETAG)
+
+
+@mock_s3
+@reduced_min_part_size
+def test_boto3_multipart_part_size():
+    s3 = boto3.client('s3', region_name='us-east-1')
+    s3.create_bucket(Bucket='mybucket')
+
+    mpu = s3.create_multipart_upload(Bucket='mybucket', Key='the-key')
+    mpu_id = mpu["UploadId"]
+
+    parts = []
+    n_parts = 10
+    for i in range(1, n_parts + 1):
+        part_size = REDUCED_PART_SIZE + i
+        body = b'1' * part_size
+        part = s3.upload_part(
+            Bucket='mybucket',
+            Key='the-key',
+            PartNumber=i,
+            UploadId=mpu_id,
+            Body=body,
+            ContentLength=len(body),
+        )
+        parts.append({"PartNumber": i, "ETag": part["ETag"]})
+
+    s3.complete_multipart_upload(
+        Bucket='mybucket',
+        Key='the-key',
+        UploadId=mpu_id,
+        MultipartUpload={"Parts": parts},
+    )
+
+    for i in range(1, n_parts + 1):
+        obj = s3.head_object(Bucket='mybucket', Key='the-key', PartNumber=i)
+        assert obj["ContentLength"] == REDUCED_PART_SIZE + i
 
 
 @mock_s3
@@ -2762,6 +2855,7 @@ def test_boto3_multiple_delete_markers():
     latest['Key'].should.equal('key-with-versions-and-unicode-ó')
     oldest['Key'].should.equal('key-with-versions-and-unicode-ó')
 
+
 @mock_s3
 def test_get_stream_gzipped():
     payload = b"this is some stuff here"
@@ -2820,3 +2914,80 @@ def test_boto3_bucket_name_too_short():
     with assert_raises(ClientError) as exc:
         s3.create_bucket(Bucket='x'*2)
     exc.exception.response['Error']['Code'].should.equal('InvalidBucketName')
+
+@mock_s3
+def test_accelerated_none_when_unspecified():
+    bucket_name = 'some_bucket'
+    s3 = boto3.client('s3')
+    s3.create_bucket(Bucket=bucket_name)
+    resp = s3.get_bucket_accelerate_configuration(Bucket=bucket_name)
+    resp.shouldnt.have.key('Status')
+
+@mock_s3
+def test_can_enable_bucket_acceleration():
+    bucket_name = 'some_bucket'
+    s3 = boto3.client('s3')
+    s3.create_bucket(Bucket=bucket_name)
+    resp = s3.put_bucket_accelerate_configuration(
+        Bucket=bucket_name,
+        AccelerateConfiguration={'Status': 'Enabled'},
+    )
+    resp.keys().should.have.length_of(1)    # Response contains nothing (only HTTP headers)
+    resp = s3.get_bucket_accelerate_configuration(Bucket=bucket_name)
+    resp.should.have.key('Status')
+    resp['Status'].should.equal('Enabled')
+
+@mock_s3
+def test_can_suspend_bucket_acceleration():
+    bucket_name = 'some_bucket'
+    s3 = boto3.client('s3')
+    s3.create_bucket(Bucket=bucket_name)
+    resp = s3.put_bucket_accelerate_configuration(
+        Bucket=bucket_name,
+        AccelerateConfiguration={'Status': 'Enabled'},
+    )
+    resp = s3.put_bucket_accelerate_configuration(
+        Bucket=bucket_name,
+        AccelerateConfiguration={'Status': 'Suspended'},
+    )
+    resp.keys().should.have.length_of(1)    # Response contains nothing (only HTTP headers)
+    resp = s3.get_bucket_accelerate_configuration(Bucket=bucket_name)
+    resp.should.have.key('Status')
+    resp['Status'].should.equal('Suspended')
+
+@mock_s3
+def test_suspending_acceleration_on_not_configured_bucket_does_nothing():
+    bucket_name = 'some_bucket'
+    s3 = boto3.client('s3')
+    s3.create_bucket(Bucket=bucket_name)
+    resp = s3.put_bucket_accelerate_configuration(
+        Bucket=bucket_name,
+        AccelerateConfiguration={'Status': 'Suspended'},
+    )
+    resp.keys().should.have.length_of(1)    # Response contains nothing (only HTTP headers)
+    resp = s3.get_bucket_accelerate_configuration(Bucket=bucket_name)
+    resp.shouldnt.have.key('Status')
+
+@mock_s3
+def test_accelerate_configuration_status_validation():
+    bucket_name = 'some_bucket'
+    s3 = boto3.client('s3')
+    s3.create_bucket(Bucket=bucket_name)
+    with assert_raises(ClientError) as exc:
+        s3.put_bucket_accelerate_configuration(
+            Bucket=bucket_name,
+            AccelerateConfiguration={'Status': 'bad_status'},
+        )
+    exc.exception.response['Error']['Code'].should.equal('MalformedXML')
+
+@mock_s3
+def test_accelerate_configuration_is_not_supported_when_bucket_name_has_dots():
+    bucket_name = 'some.bucket.with.dots'
+    s3 = boto3.client('s3')
+    s3.create_bucket(Bucket=bucket_name)
+    with assert_raises(ClientError) as exc:
+        s3.put_bucket_accelerate_configuration(
+            Bucket=bucket_name,
+            AccelerateConfiguration={'Status': 'Enabled'},
+        )
+    exc.exception.response['Error']['Code'].should.equal('InvalidRequest')

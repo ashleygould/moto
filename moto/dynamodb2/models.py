@@ -6,13 +6,17 @@ import decimal
 import json
 import re
 import uuid
+import six
 
 import boto3
 from moto.compat import OrderedDict
 from moto.core import BaseBackend, BaseModel
 from moto.core.utils import unix_time
 from moto.core.exceptions import JsonRESTError
-from .comparisons import get_comparison_func, get_filter_expression, Op
+from .comparisons import get_comparison_func
+from .comparisons import get_filter_expression
+from .comparisons import get_expected
+from .exceptions import InvalidIndexNameError
 
 
 class DynamoJsonEncoder(json.JSONEncoder):
@@ -67,9 +71,33 @@ class DynamoType(object):
             except ValueError:
                 return float(self.value)
         elif self.is_set():
-            return set(self.value)
+            sub_type = self.type[0]
+            return set([DynamoType({sub_type: v}).cast_value
+                        for v in self.value])
+        elif self.is_list():
+            return [DynamoType(v).cast_value for v in self.value]
+        elif self.is_map():
+            return dict([
+                (k, DynamoType(v).cast_value)
+                for k, v in self.value.items()])
         else:
             return self.value
+
+    def child_attr(self, key):
+        """
+        Get Map or List children by key. str for Map, int for List.
+
+        Returns DynamoType or None.
+        """
+        if isinstance(key, six.string_types) and self.is_map() and key in self.value:
+            return DynamoType(self.value[key])
+
+        if isinstance(key, int) and self.is_list():
+            idx = key
+            if idx >= 0 and idx < len(self.value):
+                return DynamoType(self.value[idx])
+
+        return None
 
     def to_json(self):
         return {self.type: self.value}
@@ -87,6 +115,12 @@ class DynamoType(object):
 
     def is_set(self):
         return self.type == 'SS' or self.type == 'NS' or self.type == 'BS'
+
+    def is_list(self):
+        return self.type == 'L'
+
+    def is_map(self):
+        return self.type == 'M'
 
     def same_type(self, other):
         return self.type == other.type
@@ -264,7 +298,9 @@ class Item(BaseModel):
             new_value = list(update_action['Value'].values())[0]
             if action == 'PUT':
                 # TODO deal with other types
-                if isinstance(new_value, list) or isinstance(new_value, set):
+                if isinstance(new_value, list):
+                    self.attrs[attribute_name] = DynamoType({"L": new_value})
+                elif isinstance(new_value, set):
                     self.attrs[attribute_name] = DynamoType({"SS": new_value})
                 elif isinstance(new_value, dict):
                     self.attrs[attribute_name] = DynamoType({"M": new_value})
@@ -293,6 +329,19 @@ class Item(BaseModel):
                     # TODO: implement other data types
                     raise NotImplementedError(
                         'ADD not supported for %s' % ', '.join(update_action['Value'].keys()))
+            elif action == 'DELETE':
+                if set(update_action['Value'].keys()) == set(['SS']):
+                    existing = self.attrs.get(attribute_name, DynamoType({"SS": {}}))
+                    new_set = set(existing.value).difference(set(new_value))
+                    self.attrs[attribute_name] = DynamoType({
+                        "SS": list(new_set)
+                    })
+                else:
+                    raise NotImplementedError(
+                        'ADD not supported for %s' % ', '.join(update_action['Value'].keys()))
+            else:
+                raise NotImplementedError(
+                    '%s action not support for update_with_attribute_updates' % action)
 
 
 class StreamRecord(BaseModel):
@@ -403,6 +452,25 @@ class Table(BaseModel):
         }
         self.set_stream_specification(streams)
 
+    @classmethod
+    def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
+        properties = cloudformation_json['Properties']
+        params = {}
+
+        if 'KeySchema' in properties:
+            params['schema'] = properties['KeySchema']
+        if 'AttributeDefinitions' in properties:
+            params['attr'] = properties['AttributeDefinitions']
+        if 'GlobalSecondaryIndexes' in properties:
+            params['global_indexes'] = properties['GlobalSecondaryIndexes']
+        if 'ProvisionedThroughput' in properties:
+            params['throughput'] = properties['ProvisionedThroughput']
+        if 'LocalSecondaryIndexes' in properties:
+            params['indexes'] = properties['LocalSecondaryIndexes']
+
+        table = dynamodb_backends[region_name].create_table(name=properties['TableName'], **params)
+        return table
+
     def _generate_arn(self, name):
         return 'arn:aws:dynamodb:us-east-1:123456789011:table/' + name
 
@@ -471,7 +539,9 @@ class Table(BaseModel):
             keys.append(range_key)
         return keys
 
-    def put_item(self, item_attrs, expected=None, overwrite=False):
+    def put_item(self, item_attrs, expected=None, condition_expression=None,
+                 expression_attribute_names=None,
+                 expression_attribute_values=None, overwrite=False):
         hash_value = DynamoType(item_attrs.get(self.hash_key_attr))
         if self.has_range_key:
             range_value = DynamoType(item_attrs.get(self.range_key_attr))
@@ -494,29 +564,15 @@ class Table(BaseModel):
                     self.range_key_type, item_attrs)
 
         if not overwrite:
-            if current is None:
-                current_attr = {}
-            elif hasattr(current, 'attrs'):
-                current_attr = current.attrs
-            else:
-                current_attr = current
+            if not get_expected(expected).expr(current):
+                raise ValueError('The conditional request failed')
+            condition_op = get_filter_expression(
+                condition_expression,
+                expression_attribute_names,
+                expression_attribute_values)
+            if not condition_op.expr(current):
+                raise ValueError('The conditional request failed')
 
-            for key, val in expected.items():
-                if 'Exists' in val and val['Exists'] is False \
-                        or 'ComparisonOperator' in val and val['ComparisonOperator'] == 'NULL':
-                    if key in current_attr:
-                        raise ValueError("The conditional request failed")
-                elif key not in current_attr:
-                    raise ValueError("The conditional request failed")
-                elif 'Value' in val and DynamoType(val['Value']).value != current_attr[key].value:
-                    raise ValueError("The conditional request failed")
-                elif 'ComparisonOperator' in val:
-                    dynamo_types = [
-                        DynamoType(ele) for ele in
-                        val.get("AttributeValueList", [])
-                    ]
-                    if not current_attr[key].compare(val['ComparisonOperator'], dynamo_types):
-                        raise ValueError('The conditional request failed')
         if range_value:
             self.items[hash_value][range_value] = item
         else:
@@ -572,7 +628,7 @@ class Table(BaseModel):
         results = []
 
         if index_name:
-            all_indexes = (self.global_indexes or []) + (self.indexes or [])
+            all_indexes = self.all_indexes()
             indexes_by_name = dict((i['IndexName'], i) for i in all_indexes)
             if index_name not in indexes_by_name:
                 raise ValueError('Invalid index: %s for table: %s. Available indexes are: %s' % (
@@ -672,11 +728,39 @@ class Table(BaseModel):
             else:
                 yield hash_set
 
-    def scan(self, filters, limit, exclusive_start_key, filter_expression=None):
+    def all_indexes(self):
+        return (self.global_indexes or []) + (self.indexes or [])
+
+    def has_idx_items(self, index_name):
+
+        all_indexes = self.all_indexes()
+        indexes_by_name = dict((i['IndexName'], i) for i in all_indexes)
+        idx = indexes_by_name[index_name]
+        idx_col_set = set([i['AttributeName'] for i in idx['KeySchema']])
+
+        for hash_set in self.items.values():
+            if self.range_key_attr:
+                for item in hash_set.values():
+                    if idx_col_set.issubset(set(item.attrs)):
+                        yield item
+            else:
+                if idx_col_set.issubset(set(hash_set.attrs)):
+                    yield hash_set
+
+    def scan(self, filters, limit, exclusive_start_key, filter_expression=None, index_name=None, projection_expression=None):
         results = []
         scanned_count = 0
+        all_indexes = self.all_indexes()
+        indexes_by_name = dict((i['IndexName'], i) for i in all_indexes)
 
-        for item in self.all_items():
+        if index_name:
+            if index_name not in indexes_by_name:
+                raise InvalidIndexNameError('The table does not have the specified index: %s' % index_name)
+            items = self.has_idx_items(index_name)
+        else:
+            items = self.all_items()
+
+        for item in items:
             scanned_count += 1
             passes_all_conditions = True
             for attribute_name, (comparison_operator, comparison_objs) in filters.items():
@@ -702,11 +786,19 @@ class Table(BaseModel):
             if passes_all_conditions:
                 results.append(item)
 
+        if projection_expression:
+            expressions = [x.strip() for x in projection_expression.split(',')]
+            results = copy.deepcopy(results)
+            for result in results:
+                for attr in list(result.attrs):
+                    if attr not in expressions:
+                        result.attrs.pop(attr)
+
         results, last_evaluated_key = self._trim_results(results, limit,
-                                                         exclusive_start_key)
+                                                         exclusive_start_key, index_name)
         return results, scanned_count, last_evaluated_key
 
-    def _trim_results(self, results, limit, exclusive_start_key):
+    def _trim_results(self, results, limit, exclusive_start_key, scaned_index=None):
         if exclusive_start_key is not None:
             hash_key = DynamoType(exclusive_start_key.get(self.hash_key_attr))
             range_key = exclusive_start_key.get(self.range_key_attr)
@@ -725,6 +817,14 @@ class Table(BaseModel):
             }
             if results[-1].range_key is not None:
                 last_evaluated_key[self.range_key_attr] = results[-1].range_key
+
+            if scaned_index:
+                all_indexes = self.all_indexes()
+                indexes_by_name = dict((i['IndexName'], i) for i in all_indexes)
+                idx = indexes_by_name[scaned_index]
+                idx_col_list = [i['AttributeName'] for i in idx['KeySchema']]
+                for col in idx_col_list:
+                    last_evaluated_key[col] = results[-1].attrs[col]
 
         return results, last_evaluated_key
 
@@ -825,11 +925,15 @@ class DynamoDBBackend(BaseBackend):
         table.global_indexes = list(gsis_by_name.values())
         return table
 
-    def put_item(self, table_name, item_attrs, expected=None, overwrite=False):
+    def put_item(self, table_name, item_attrs, expected=None,
+                 condition_expression=None, expression_attribute_names=None,
+                 expression_attribute_values=None, overwrite=False):
         table = self.tables.get(table_name)
         if not table:
             return None
-        return table.put_item(item_attrs, expected, overwrite)
+        return table.put_item(item_attrs, expected, condition_expression,
+                              expression_attribute_names,
+                              expression_attribute_values, overwrite)
 
     def get_table_keys_name(self, table_name, keys):
         """
@@ -885,15 +989,12 @@ class DynamoDBBackend(BaseBackend):
         range_values = [DynamoType(range_value)
                         for range_value in range_value_dicts]
 
-        if filter_expression is not None:
-            filter_expression = get_filter_expression(filter_expression, expr_names, expr_values)
-        else:
-            filter_expression = Op(None, None)  # Will always eval to true
+        filter_expression = get_filter_expression(filter_expression, expr_names, expr_values)
 
         return table.query(hash_key, range_comparison, range_values, limit,
                            exclusive_start_key, scan_index_forward, projection_expression, index_name, filter_expression, **filter_kwargs)
 
-    def scan(self, table_name, filters, limit, exclusive_start_key, filter_expression, expr_names, expr_values):
+    def scan(self, table_name, filters, limit, exclusive_start_key, filter_expression, expr_names, expr_values, index_name, projection_expression):
         table = self.tables.get(table_name)
         if not table:
             return None, None, None
@@ -903,15 +1004,14 @@ class DynamoDBBackend(BaseBackend):
             dynamo_types = [DynamoType(value) for value in comparison_values]
             scan_filters[key] = (comparison_operator, dynamo_types)
 
-        if filter_expression is not None:
-            filter_expression = get_filter_expression(filter_expression, expr_names, expr_values)
-        else:
-            filter_expression = Op(None, None)  # Will always eval to true
+        filter_expression = get_filter_expression(filter_expression, expr_names, expr_values)
 
-        return table.scan(scan_filters, limit, exclusive_start_key, filter_expression)
+        projection_expression = ','.join([expr_names.get(attr, attr) for attr in projection_expression.replace(' ', '').split(',')])
+
+        return table.scan(scan_filters, limit, exclusive_start_key, filter_expression, index_name, projection_expression)
 
     def update_item(self, table_name, key, update_expression, attribute_updates, expression_attribute_names,
-                    expression_attribute_values, expected=None):
+                    expression_attribute_values, expected=None, condition_expression=None):
         table = self.get_table(table_name)
 
         if all([table.hash_key_attr in key, table.range_key_attr in key]):
@@ -930,32 +1030,17 @@ class DynamoDBBackend(BaseBackend):
 
         item = table.get_item(hash_value, range_value)
 
-        if item is None:
-            item_attr = {}
-        elif hasattr(item, 'attrs'):
-            item_attr = item.attrs
-        else:
-            item_attr = item
-
         if not expected:
             expected = {}
 
-        for key, val in expected.items():
-            if 'Exists' in val and val['Exists'] is False \
-                    or 'ComparisonOperator' in val and val['ComparisonOperator'] == 'NULL':
-                if key in item_attr:
-                    raise ValueError("The conditional request failed")
-            elif key not in item_attr:
-                raise ValueError("The conditional request failed")
-            elif 'Value' in val and DynamoType(val['Value']).value != item_attr[key].value:
-                raise ValueError("The conditional request failed")
-            elif 'ComparisonOperator' in val:
-                dynamo_types = [
-                    DynamoType(ele) for ele in
-                    val.get("AttributeValueList", [])
-                ]
-                if not item_attr[key].compare(val['ComparisonOperator'], dynamo_types):
-                    raise ValueError('The conditional request failed')
+        if not get_expected(expected).expr(item):
+            raise ValueError('The conditional request failed')
+        condition_op = get_filter_expression(
+            condition_expression,
+            expression_attribute_names,
+            expression_attribute_values)
+        if not condition_op.expr(item):
+            raise ValueError('The conditional request failed')
 
         # Update does not fail on new items, so create one
         if item is None:

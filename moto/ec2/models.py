@@ -20,6 +20,7 @@ from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
 from boto.ec2.spotinstancerequest import SpotInstanceRequest as BotoSpotRequest
 from boto.ec2.launchspecification import LaunchSpecification
 
+
 from moto.compat import OrderedDict
 from moto.core import BaseBackend
 from moto.core.models import Model, BaseModel
@@ -35,20 +36,25 @@ from .exceptions import (
     InvalidAMIIdError,
     InvalidAMIAttributeItemValueError,
     InvalidAssociationIdError,
+    InvalidAvailabilityZoneError,
+    InvalidCIDRBlockParameterError,
     InvalidCIDRSubnetError,
     InvalidCustomerGatewayIdError,
+    InvalidDestinationCIDRBlockParameterError,
     InvalidDHCPOptionsIdError,
     InvalidDomainError,
     InvalidID,
     InvalidInstanceIdError,
     InvalidInternetGatewayIdError,
     InvalidKeyPairDuplicateError,
+    InvalidKeyPairFormatError,
     InvalidKeyPairNameError,
     InvalidNetworkAclIdError,
     InvalidNetworkAttachmentIdError,
     InvalidNetworkInterfaceIdError,
     InvalidParameterValueError,
     InvalidParameterValueErrorTagNull,
+    InvalidParameterValueErrorUnknownAttribute,
     InvalidPermissionNotFoundError,
     InvalidPermissionDuplicateError,
     InvalidRouteTableIdError,
@@ -56,20 +62,26 @@ from .exceptions import (
     InvalidSecurityGroupDuplicateError,
     InvalidSecurityGroupNotFoundError,
     InvalidSnapshotIdError,
+    InvalidSubnetConflictError,
     InvalidSubnetIdError,
+    InvalidSubnetRangeError,
     InvalidVolumeIdError,
     InvalidVolumeAttachmentError,
     InvalidVpcCidrBlockAssociationIdError,
     InvalidVPCPeeringConnectionIdError,
     InvalidVPCPeeringConnectionStateTransitionError,
     InvalidVPCIdError,
+    InvalidVPCRangeError,
     InvalidVpnGatewayIdError,
     InvalidVpnConnectionIdError,
     MalformedAMIIdError,
     MalformedDHCPOptionsIdError,
     MissingParameterError,
     MotoNotImplementedError,
+    NetworkAclEntryAlreadyExistsError,
     OperationNotPermitted,
+    OperationNotPermitted2,
+    OperationNotPermitted3,
     ResourceAlreadyAssociatedError,
     RulesPerSecurityGroupLimitExceededError,
     TagLimitExceeded)
@@ -118,6 +130,8 @@ from .utils import (
     random_customer_gateway_id,
     is_tag_filter,
     tag_filter_matches,
+    rsa_public_key_parse,
+    rsa_public_key_fingerprint
 )
 
 INSTANCE_TYPES = json.load(
@@ -127,6 +141,8 @@ AMIS = json.load(
     open(os.environ.get('MOTO_AMIS_PATH') or resource_filename(
          __name__, 'resources/amis.json'), 'r')
 )
+
+OWNER_ID = "111122223333"
 
 
 def utc_date_and_time():
@@ -187,7 +203,7 @@ class TaggedEC2Resource(BaseModel):
 
 class NetworkInterface(TaggedEC2Resource):
     def __init__(self, ec2_backend, subnet, private_ip_address, device_index=0,
-                 public_ip_auto_assign=True, group_ids=None):
+                 public_ip_auto_assign=True, group_ids=None, description=None):
         self.ec2_backend = ec2_backend
         self.id = random_eni_id()
         self.device_index = device_index
@@ -195,6 +211,7 @@ class NetworkInterface(TaggedEC2Resource):
         self.subnet = subnet
         self.instance = None
         self.attachment_id = None
+        self.description = description
 
         self.public_ip = None
         self.public_ip_auto_assign = public_ip_auto_assign
@@ -232,11 +249,13 @@ class NetworkInterface(TaggedEC2Resource):
             subnet = None
 
         private_ip_address = properties.get('PrivateIpAddress', None)
+        description = properties.get('Description', None)
 
         network_interface = ec2_backend.create_network_interface(
             subnet,
             private_ip_address,
-            group_ids=security_group_ids
+            group_ids=security_group_ids,
+            description=description
         )
         return network_interface
 
@@ -284,6 +303,8 @@ class NetworkInterface(TaggedEC2Resource):
             return [group.id for group in self._group_set]
         elif filter_name == 'availability-zone':
             return self.subnet.availability_zone
+        elif filter_name == 'description':
+            return self.description
         else:
             return super(NetworkInterface, self).get_filter_value(
                 filter_name, 'DescribeNetworkInterfaces')
@@ -294,9 +315,9 @@ class NetworkInterfaceBackend(object):
         self.enis = {}
         super(NetworkInterfaceBackend, self).__init__()
 
-    def create_network_interface(self, subnet, private_ip_address, group_ids=None, **kwargs):
+    def create_network_interface(self, subnet, private_ip_address, group_ids=None, description=None, **kwargs):
         eni = NetworkInterface(
-            self, subnet, private_ip_address, group_ids=group_ids, **kwargs)
+            self, subnet, private_ip_address, group_ids=group_ids, description=description, **kwargs)
         self.enis[eni.id] = eni
         return eni
 
@@ -329,6 +350,12 @@ class NetworkInterfaceBackend(object):
                             if group.id in _filter_value:
                                 enis.append(eni)
                                 break
+                elif _filter == 'private-ip-address:':
+                    enis = [eni for eni in enis if eni.private_ip_address in _filter_value]
+                elif _filter == 'subnet-id':
+                    enis = [eni for eni in enis if eni.subnet.id in _filter_value]
+                elif _filter == 'description':
+                    enis = [eni for eni in enis if eni.description in _filter_value]
                 else:
                     self.raise_not_implemented_error(
                         "The filter '{0}' for DescribeNetworkInterfaces".format(_filter))
@@ -370,6 +397,10 @@ class NetworkInterfaceBackend(object):
 
 
 class Instance(TaggedEC2Resource, BotoInstance):
+    VALID_ATTRIBUTES = {'instanceType', 'kernel', 'ramdisk', 'userData', 'disableApiTermination',
+                        'instanceInitiatedShutdownBehavior', 'rootDeviceName', 'blockDeviceMapping',
+                        'productCodes', 'sourceDestCheck', 'groupSet', 'ebsOptimized', 'sriovNetSupport'}
+
     def __init__(self, ec2_backend, image_id, user_data, security_groups, **kwargs):
         super(Instance, self).__init__()
         self.ec2_backend = ec2_backend
@@ -392,11 +423,13 @@ class Instance(TaggedEC2Resource, BotoInstance):
         self.launch_time = utc_date_and_time()
         self.ami_launch_index = kwargs.get("ami_launch_index", 0)
         self.disable_api_termination = kwargs.get("disable_api_termination", False)
+        self.instance_initiated_shutdown_behavior = kwargs.get("instance_initiated_shutdown_behavior", "stop")
+        self.sriov_net_support = "simple"
         self._spot_fleet_id = kwargs.get("spot_fleet_id", None)
-        associate_public_ip = kwargs.get("associate_public_ip", False)
+        self.associate_public_ip = kwargs.get("associate_public_ip", False)
         if in_ec2_classic:
             # If we are in EC2-Classic, autoassign a public IP
-            associate_public_ip = True
+            self.associate_public_ip = True
 
         amis = self.ec2_backend.describe_images(filters={'image-id': image_id})
         ami = amis[0] if amis else None
@@ -404,7 +437,7 @@ class Instance(TaggedEC2Resource, BotoInstance):
             warnings.warn('Could not find AMI with image-id:{0}, '
                           'in the near future this will '
                           'cause an error.\n'
-                          'Use ec2_backend.describe_images() to'
+                          'Use ec2_backend.describe_images() to '
                           'find suitable image for your test'.format(image_id),
                           PendingDeprecationWarning)
 
@@ -427,9 +460,9 @@ class Instance(TaggedEC2Resource, BotoInstance):
             self.vpc_id = subnet.vpc_id
             self._placement.zone = subnet.availability_zone
 
-            if associate_public_ip is None:
+            if self.associate_public_ip is None:
                 # Mapping public ip hasnt been explicitly enabled or disabled
-                associate_public_ip = subnet.map_public_ip_on_launch == 'true'
+                self.associate_public_ip = subnet.map_public_ip_on_launch == 'true'
         elif placement:
             self._placement.zone = placement
         else:
@@ -441,7 +474,7 @@ class Instance(TaggedEC2Resource, BotoInstance):
         self.prep_nics(
             kwargs.get("nics", {}),
             private_ip=kwargs.get("private_ip"),
-            associate_public_ip=associate_public_ip
+            associate_public_ip=self.associate_public_ip
         )
 
     def __del__(self):
@@ -775,14 +808,22 @@ class InstanceBackend(object):
         setattr(instance, key, value)
         return instance
 
-    def modify_instance_security_groups(self, instance_id, new_group_list):
+    def modify_instance_security_groups(self, instance_id, new_group_id_list):
         instance = self.get_instance(instance_id)
+        new_group_list = []
+        for new_group_id in new_group_id_list:
+            new_group_list.append(self.get_security_group_from_id(new_group_id))
         setattr(instance, 'security_groups', new_group_list)
         return instance
 
-    def describe_instance_attribute(self, instance_id, key):
-        if key == 'group_set':
+    def describe_instance_attribute(self, instance_id, attribute):
+        if attribute not in Instance.VALID_ATTRIBUTES:
+            raise InvalidParameterValueErrorUnknownAttribute(attribute)
+
+        if attribute == 'groupSet':
             key = 'security_groups'
+        else:
+            key = camelcase_to_underscores(attribute)
         instance = self.get_instance(instance_id)
         value = getattr(instance, key)
         return instance, value
@@ -908,7 +949,14 @@ class KeyPairBackend(object):
     def import_key_pair(self, key_name, public_key_material):
         if key_name in self.keypairs:
             raise InvalidKeyPairDuplicateError(key_name)
-        keypair = KeyPair(key_name, **random_key_pair())
+
+        try:
+            rsa_public_key = rsa_public_key_parse(public_key_material)
+        except ValueError:
+            raise InvalidKeyPairFormatError()
+
+        fingerprint = rsa_public_key_fingerprint(rsa_public_key)
+        keypair = KeyPair(key_name, material=public_key_material, fingerprint=fingerprint)
         self.keypairs[key_name] = keypair
         return keypair
 
@@ -1041,7 +1089,7 @@ class TagBackend(object):
 
 class Ami(TaggedEC2Resource):
     def __init__(self, ec2_backend, ami_id, instance=None, source_ami=None,
-                 name=None, description=None, owner_id=111122223333,
+                 name=None, description=None, owner_id=OWNER_ID,
                  public=False, virtualization_type=None, architecture=None,
                  state='available', creation_date=None, platform=None,
                  image_type='machine', image_location=None, hypervisor=None,
@@ -1154,7 +1202,7 @@ class AmiBackend(object):
 
         ami = Ami(self, ami_id, instance=instance, source_ami=None,
                   name=name, description=description,
-                  owner_id=context.get_current_user() if context else '111122223333')
+                  owner_id=context.get_current_user() if context else OWNER_ID)
         self.amis[ami_id] = ami
         return ami
 
@@ -1269,17 +1317,107 @@ class Region(object):
 
 
 class Zone(object):
-    def __init__(self, name, region_name):
+    def __init__(self, name, region_name, zone_id):
         self.name = name
         self.region_name = region_name
+        self.zone_id = zone_id
 
 
 class RegionsAndZonesBackend(object):
     regions = [Region(ri.name, ri.endpoint) for ri in boto.ec2.regions()]
 
-    zones = dict(
-        (region, [Zone(region + c, region) for c in 'abc'])
-        for region in [r.name for r in regions])
+    zones = {
+        'ap-south-1': [
+            Zone(region_name="ap-south-1", name="ap-south-1a", zone_id="aps1-az1"),
+            Zone(region_name="ap-south-1", name="ap-south-1b", zone_id="aps1-az3")
+        ],
+        'eu-west-3': [
+            Zone(region_name="eu-west-3", name="eu-west-3a", zone_id="euw3-az1"),
+            Zone(region_name="eu-west-3", name="eu-west-3b", zone_id="euw3-az2"),
+            Zone(region_name="eu-west-3", name="eu-west-3c", zone_id="euw3-az3")
+        ],
+        'eu-north-1': [
+            Zone(region_name="eu-north-1", name="eu-north-1a", zone_id="eun1-az1"),
+            Zone(region_name="eu-north-1", name="eu-north-1b", zone_id="eun1-az2"),
+            Zone(region_name="eu-north-1", name="eu-north-1c", zone_id="eun1-az3")
+        ],
+        'eu-west-2': [
+            Zone(region_name="eu-west-2", name="eu-west-2a", zone_id="euw2-az2"),
+            Zone(region_name="eu-west-2", name="eu-west-2b", zone_id="euw2-az3"),
+            Zone(region_name="eu-west-2", name="eu-west-2c", zone_id="euw2-az1")
+        ],
+        'eu-west-1': [
+            Zone(region_name="eu-west-1", name="eu-west-1a", zone_id="euw1-az3"),
+            Zone(region_name="eu-west-1", name="eu-west-1b", zone_id="euw1-az1"),
+            Zone(region_name="eu-west-1", name="eu-west-1c", zone_id="euw1-az2")
+        ],
+        'ap-northeast-3': [
+            Zone(region_name="ap-northeast-3", name="ap-northeast-2a", zone_id="apne3-az1")
+        ],
+        'ap-northeast-2': [
+            Zone(region_name="ap-northeast-2", name="ap-northeast-2a", zone_id="apne2-az1"),
+            Zone(region_name="ap-northeast-2", name="ap-northeast-2c", zone_id="apne2-az3")
+        ],
+        'ap-northeast-1': [
+            Zone(region_name="ap-northeast-1", name="ap-northeast-1a", zone_id="apne1-az4"),
+            Zone(region_name="ap-northeast-1", name="ap-northeast-1c", zone_id="apne1-az1"),
+            Zone(region_name="ap-northeast-1", name="ap-northeast-1d", zone_id="apne1-az2")
+        ],
+        'sa-east-1': [
+            Zone(region_name="sa-east-1", name="sa-east-1a", zone_id="sae1-az1"),
+            Zone(region_name="sa-east-1", name="sa-east-1c", zone_id="sae1-az3")
+        ],
+        'ca-central-1': [
+            Zone(region_name="ca-central-1", name="ca-central-1a", zone_id="cac1-az1"),
+            Zone(region_name="ca-central-1", name="ca-central-1b", zone_id="cac1-az2")
+        ],
+        'ap-southeast-1': [
+            Zone(region_name="ap-southeast-1", name="ap-southeast-1a", zone_id="apse1-az1"),
+            Zone(region_name="ap-southeast-1", name="ap-southeast-1b", zone_id="apse1-az2"),
+            Zone(region_name="ap-southeast-1", name="ap-southeast-1c", zone_id="apse1-az3")
+        ],
+        'ap-southeast-2': [
+            Zone(region_name="ap-southeast-2", name="ap-southeast-2a", zone_id="apse2-az1"),
+            Zone(region_name="ap-southeast-2", name="ap-southeast-2b", zone_id="apse2-az3"),
+            Zone(region_name="ap-southeast-2", name="ap-southeast-2c", zone_id="apse2-az2")
+        ],
+        'eu-central-1': [
+            Zone(region_name="eu-central-1", name="eu-central-1a", zone_id="euc1-az2"),
+            Zone(region_name="eu-central-1", name="eu-central-1b", zone_id="euc1-az3"),
+            Zone(region_name="eu-central-1", name="eu-central-1c", zone_id="euc1-az1")
+        ],
+        'us-east-1': [
+            Zone(region_name="us-east-1", name="us-east-1a", zone_id="use1-az6"),
+            Zone(region_name="us-east-1", name="us-east-1b", zone_id="use1-az1"),
+            Zone(region_name="us-east-1", name="us-east-1c", zone_id="use1-az2"),
+            Zone(region_name="us-east-1", name="us-east-1d", zone_id="use1-az4"),
+            Zone(region_name="us-east-1", name="us-east-1e", zone_id="use1-az3"),
+            Zone(region_name="us-east-1", name="us-east-1f", zone_id="use1-az5")
+        ],
+        'us-east-2': [
+            Zone(region_name="us-east-2", name="us-east-2a", zone_id="use2-az1"),
+            Zone(region_name="us-east-2", name="us-east-2b", zone_id="use2-az2"),
+            Zone(region_name="us-east-2", name="us-east-2c", zone_id="use2-az3")
+        ],
+        'us-west-1': [
+            Zone(region_name="us-west-1", name="us-west-1a", zone_id="usw1-az3"),
+            Zone(region_name="us-west-1", name="us-west-1b", zone_id="usw1-az1")
+        ],
+        'us-west-2': [
+            Zone(region_name="us-west-2", name="us-west-2a", zone_id="usw2-az2"),
+            Zone(region_name="us-west-2", name="us-west-2b", zone_id="usw2-az1"),
+            Zone(region_name="us-west-2", name="us-west-2c", zone_id="usw2-az3")
+        ],
+        'cn-north-1': [
+            Zone(region_name="cn-north-1", name="cn-north-1a", zone_id="cnn1-az1"),
+            Zone(region_name="cn-north-1", name="cn-north-1b", zone_id="cnn1-az2")
+        ],
+        'us-gov-west-1': [
+            Zone(region_name="us-gov-west-1", name="us-gov-west-1a", zone_id="usgw1-az1"),
+            Zone(region_name="us-gov-west-1", name="us-gov-west-1b", zone_id="usgw1-az2"),
+            Zone(region_name="us-gov-west-1", name="us-gov-west-1c", zone_id="usgw1-az3")
+        ]
+    }
 
     def describe_regions(self, region_names=[]):
         if len(region_names) == 0:
@@ -1332,7 +1470,7 @@ class SecurityGroup(TaggedEC2Resource):
         self.egress_rules = [SecurityRule(-1, None, None, ['0.0.0.0/0'], [])]
         self.enis = {}
         self.vpc_id = vpc_id
-        self.owner_id = "123456789012"
+        self.owner_id = OWNER_ID
 
     @classmethod
     def create_from_cloudformation_json(cls, resource_name, cloudformation_json, region_name):
@@ -1853,7 +1991,7 @@ class Volume(TaggedEC2Resource):
 
 
 class Snapshot(TaggedEC2Resource):
-    def __init__(self, ec2_backend, snapshot_id, volume, description, encrypted=False, owner_id='123456789012'):
+    def __init__(self, ec2_backend, snapshot_id, volume, description, encrypted=False, owner_id=OWNER_ID):
         self.id = snapshot_id
         self.volume = volume
         self.description = description
@@ -1879,6 +2017,8 @@ class Snapshot(TaggedEC2Resource):
             return str(self.encrypted).lower()
         elif filter_name == 'status':
             return self.status
+        elif filter_name == 'owner-id':
+            return self.owner_id
         else:
             return super(Snapshot, self).get_filter_value(
                 filter_name, 'DescribeSnapshots')
@@ -2120,22 +2260,28 @@ class VPC(TaggedEC2Resource):
 
 
 class VPCBackend(object):
-    __refs__ = defaultdict(list)
+    vpc_refs = defaultdict(set)
 
     def __init__(self):
         self.vpcs = {}
-        self.__refs__[self.__class__].append(weakref.ref(self))
+        self.vpc_refs[self.__class__].add(weakref.ref(self))
         super(VPCBackend, self).__init__()
 
     @classmethod
-    def get_instances(cls):
-        for inst_ref in cls.__refs__[cls]:
+    def get_vpc_refs(cls):
+        for inst_ref in cls.vpc_refs[cls]:
             inst = inst_ref()
             if inst is not None:
                 yield inst
 
     def create_vpc(self, cidr_block, instance_tenancy='default', amazon_provided_ipv6_cidr_block=False):
         vpc_id = random_vpc_id()
+        try:
+            vpc_cidr_block = ipaddress.IPv4Network(six.text_type(cidr_block), strict=False)
+        except ValueError:
+            raise InvalidCIDRBlockParameterError(cidr_block)
+        if vpc_cidr_block.prefixlen < 16 or vpc_cidr_block.prefixlen > 28:
+            raise InvalidVPCRangeError(cidr_block)
         vpc = VPC(self, vpc_id, cidr_block, len(self.vpcs) == 0, instance_tenancy, amazon_provided_ipv6_cidr_block)
         self.vpcs[vpc_id] = vpc
 
@@ -2159,7 +2305,7 @@ class VPCBackend(object):
 
     # get vpc by vpc id and aws region
     def get_cross_vpc(self, vpc_id, peer_region):
-        for vpcs in self.get_instances():
+        for vpcs in self.get_vpc_refs():
             if vpcs.region_name == peer_region:
                 match_vpc = vpcs.get_vpc(vpc_id)
         return match_vpc
@@ -2280,15 +2426,31 @@ class VPCPeeringConnection(TaggedEC2Resource):
 
 
 class VPCPeeringConnectionBackend(object):
+    # for cross region vpc reference
+    vpc_pcx_refs = defaultdict(set)
+
     def __init__(self):
         self.vpc_pcxs = {}
+        self.vpc_pcx_refs[self.__class__].add(weakref.ref(self))
         super(VPCPeeringConnectionBackend, self).__init__()
+
+    @classmethod
+    def get_vpc_pcx_refs(cls):
+        for inst_ref in cls.vpc_pcx_refs[cls]:
+            inst = inst_ref()
+            if inst is not None:
+                yield inst
 
     def create_vpc_peering_connection(self, vpc, peer_vpc):
         vpc_pcx_id = random_vpc_peering_connection_id()
         vpc_pcx = VPCPeeringConnection(vpc_pcx_id, vpc, peer_vpc)
         vpc_pcx._status.pending()
         self.vpc_pcxs[vpc_pcx_id] = vpc_pcx
+        # insert cross region peering info
+        if vpc.ec2_backend.region_name != peer_vpc.ec2_backend.region_name:
+            for vpc_pcx_cx in peer_vpc.ec2_backend.get_vpc_pcx_refs():
+                if vpc_pcx_cx.region_name == peer_vpc.ec2_backend.region_name:
+                    vpc_pcx_cx.vpc_pcxs[vpc_pcx_id] = vpc_pcx
         return vpc_pcx
 
     def get_all_vpc_peering_connections(self):
@@ -2306,6 +2468,11 @@ class VPCPeeringConnectionBackend(object):
 
     def accept_vpc_peering_connection(self, vpc_pcx_id):
         vpc_pcx = self.get_vpc_peering_connection(vpc_pcx_id)
+        # if cross region need accepter from another region
+        pcx_req_region = vpc_pcx.vpc.ec2_backend.region_name
+        pcx_acp_region = vpc_pcx.peer_vpc.ec2_backend.region_name
+        if pcx_req_region != pcx_acp_region and self.region_name == pcx_req_region:
+            raise OperationNotPermitted2(self.region_name, vpc_pcx.id, pcx_acp_region)
         if vpc_pcx._status.code != 'pending-acceptance':
             raise InvalidVPCPeeringConnectionStateTransitionError(vpc_pcx.id)
         vpc_pcx._status.accept()
@@ -2313,6 +2480,11 @@ class VPCPeeringConnectionBackend(object):
 
     def reject_vpc_peering_connection(self, vpc_pcx_id):
         vpc_pcx = self.get_vpc_peering_connection(vpc_pcx_id)
+        # if cross region need accepter from another region
+        pcx_req_region = vpc_pcx.vpc.ec2_backend.region_name
+        pcx_acp_region = vpc_pcx.peer_vpc.ec2_backend.region_name
+        if pcx_req_region != pcx_acp_region and self.region_name == pcx_req_region:
+            raise OperationNotPermitted3(self.region_name, vpc_pcx.id, pcx_acp_region)
         if vpc_pcx._status.code != 'pending-acceptance':
             raise InvalidVPCPeeringConnectionStateTransitionError(vpc_pcx.id)
         vpc_pcx._status.reject()
@@ -2321,15 +2493,18 @@ class VPCPeeringConnectionBackend(object):
 
 class Subnet(TaggedEC2Resource):
     def __init__(self, ec2_backend, subnet_id, vpc_id, cidr_block, availability_zone, default_for_az,
-                 map_public_ip_on_launch):
+                 map_public_ip_on_launch, owner_id=OWNER_ID, assign_ipv6_address_on_creation=False):
         self.ec2_backend = ec2_backend
         self.id = subnet_id
         self.vpc_id = vpc_id
         self.cidr_block = cidr_block
-        self.cidr = ipaddress.ip_network(six.text_type(self.cidr_block))
+        self.cidr = ipaddress.IPv4Network(six.text_type(self.cidr_block), strict=False)
         self._availability_zone = availability_zone
         self.default_for_az = default_for_az
         self.map_public_ip_on_launch = map_public_ip_on_launch
+        self.owner_id = owner_id
+        self.assign_ipv6_address_on_creation = assign_ipv6_address_on_creation
+        self.ipv6_cidr_block_associations = []
 
         # Theory is we assign ip's as we go (as 16,777,214 usable IPs in a /8)
         self._subnet_ip_generator = self.cidr.hosts()
@@ -2359,7 +2534,7 @@ class Subnet(TaggedEC2Resource):
 
     @property
     def availability_zone(self):
-        return self._availability_zone
+        return self._availability_zone.name
 
     @property
     def physical_resource_id(self):
@@ -2456,16 +2631,35 @@ class SubnetBackend(object):
                 return subnets[subnet_id]
         raise InvalidSubnetIdError(subnet_id)
 
-    def create_subnet(self, vpc_id, cidr_block, availability_zone):
+    def create_subnet(self, vpc_id, cidr_block, availability_zone, context=None):
         subnet_id = random_subnet_id()
-        self.get_vpc(vpc_id)  # Validate VPC exists
+        vpc = self.get_vpc(vpc_id)  # Validate VPC exists and the supplied CIDR block is a subnet of the VPC's
+        vpc_cidr_block = ipaddress.IPv4Network(six.text_type(vpc.cidr_block), strict=False)
+        try:
+            subnet_cidr_block = ipaddress.IPv4Network(six.text_type(cidr_block), strict=False)
+        except ValueError:
+            raise InvalidCIDRBlockParameterError(cidr_block)
+        if not (vpc_cidr_block.network_address <= subnet_cidr_block.network_address and
+                vpc_cidr_block.broadcast_address >= subnet_cidr_block.broadcast_address):
+            raise InvalidSubnetRangeError(cidr_block)
+
+        for subnet in self.get_all_subnets(filters={'vpc-id': vpc_id}):
+            if subnet.cidr.overlaps(subnet_cidr_block):
+                raise InvalidSubnetConflictError(cidr_block)
 
         # if this is the first subnet for an availability zone,
         # consider it the default
         default_for_az = str(availability_zone not in self.subnets).lower()
         map_public_ip_on_launch = default_for_az
-        subnet = Subnet(self, subnet_id, vpc_id, cidr_block, availability_zone,
-                        default_for_az, map_public_ip_on_launch)
+        if availability_zone is None:
+            availability_zone = 'us-east-1a'
+        try:
+            availability_zone_data = next(zone for zones in RegionsAndZonesBackend.zones.values() for zone in zones if zone.name == availability_zone)
+        except StopIteration:
+            raise InvalidAvailabilityZoneError(availability_zone, ", ".join([zone.name for zones in RegionsAndZonesBackend.zones.values() for zone in zones]))
+        subnet = Subnet(self, subnet_id, vpc_id, cidr_block, availability_zone_data,
+                        default_for_az, map_public_ip_on_launch,
+                        owner_id=context.get_current_user() if context else OWNER_ID, assign_ipv6_address_on_creation=False)
 
         # AWS associates a new subnet with the default Network ACL
         self.associate_default_network_acl_with_subnet(subnet_id, vpc_id)
@@ -2493,11 +2687,12 @@ class SubnetBackend(object):
                 return subnets.pop(subnet_id, None)
         raise InvalidSubnetIdError(subnet_id)
 
-    def modify_subnet_attribute(self, subnet_id, map_public_ip):
+    def modify_subnet_attribute(self, subnet_id, attr_name, attr_value):
         subnet = self.get_subnet(subnet_id)
-        if map_public_ip not in ('true', 'false'):
-            raise InvalidParameterValueError(map_public_ip)
-        subnet.map_public_ip_on_launch = map_public_ip
+        if attr_name in ('map_public_ip_on_launch', 'assign_ipv6_address_on_creation'):
+            setattr(subnet, attr_name, attr_value)
+        else:
+            raise InvalidParameterValueError(attr_name)
 
 
 class SubnetRouteTableAssociation(object):
@@ -2717,6 +2912,11 @@ class RouteBackend(object):
                 gateway = self.get_vpn_gateway(gateway_id)
             elif EC2_RESOURCE_TO_PREFIX['internet-gateway'] in gateway_id:
                 gateway = self.get_internet_gateway(gateway_id)
+
+        try:
+            ipaddress.IPv4Network(six.text_type(destination_cidr_block), strict=False)
+        except ValueError:
+            raise InvalidDestinationCIDRBlockParameterError(destination_cidr_block)
 
         route = Route(route_table, destination_cidr_block, local=local,
                       gateway=gateway,
@@ -3595,10 +3795,10 @@ class NetworkAclBackend(object):
 
     def add_default_entries(self, network_acl_id):
         default_acl_entries = [
-            {'rule_number': 100, 'rule_action': 'allow', 'egress': 'true'},
-            {'rule_number': 32767, 'rule_action': 'deny', 'egress': 'true'},
-            {'rule_number': 100, 'rule_action': 'allow', 'egress': 'false'},
-            {'rule_number': 32767, 'rule_action': 'deny', 'egress': 'false'}
+            {'rule_number': "100", 'rule_action': 'allow', 'egress': 'true'},
+            {'rule_number': "32767", 'rule_action': 'deny', 'egress': 'true'},
+            {'rule_number': "100", 'rule_action': 'allow', 'egress': 'false'},
+            {'rule_number': "32767", 'rule_action': 'deny', 'egress': 'false'}
         ]
         for entry in default_acl_entries:
             self.create_network_acl_entry(network_acl_id=network_acl_id, rule_number=entry['rule_number'], protocol='-1',
@@ -3629,12 +3829,14 @@ class NetworkAclBackend(object):
                                  icmp_code, icmp_type, port_range_from,
                                  port_range_to):
 
+        network_acl = self.get_network_acl(network_acl_id)
+        if any(entry.egress == egress and entry.rule_number == rule_number for entry in network_acl.network_acl_entries):
+            raise NetworkAclEntryAlreadyExistsError(rule_number)
         network_acl_entry = NetworkAclEntry(self, network_acl_id, rule_number,
                                             protocol, rule_action, egress,
                                             cidr_block, icmp_code, icmp_type,
                                             port_range_from, port_range_to)
 
-        network_acl = self.get_network_acl(network_acl_id)
         network_acl.network_acl_entries.append(network_acl_entry)
         return network_acl_entry
 

@@ -11,20 +11,29 @@ import sure  # noqa
 from moto import mock_kms, mock_kms_deprecated
 from nose.tools import assert_raises
 from freezegun import freeze_time
+from datetime import date
 from datetime import datetime
 from dateutil.tz import tzutc
 
 
-@mock_kms_deprecated
+@mock_kms
 def test_create_key():
-    conn = boto.kms.connect_to_region("us-west-2")
+    conn = boto3.client('kms', region_name='us-east-1')
+    with freeze_time("2015-01-01 00:00:00"):
+        key = conn.create_key(Policy="my policy",
+                              Description="my key",
+                              KeyUsage='ENCRYPT_DECRYPT',
+                              Tags=[
+                                  {
+                                      'TagKey': 'project',
+                                      'TagValue': 'moto',
+                                  },
+                              ])
 
-    key = conn.create_key(policy="my policy",
-                          description="my key", key_usage='ENCRYPT_DECRYPT')
-
-    key['KeyMetadata']['Description'].should.equal("my key")
-    key['KeyMetadata']['KeyUsage'].should.equal("ENCRYPT_DECRYPT")
-    key['KeyMetadata']['Enabled'].should.equal(True)
+        key['KeyMetadata']['Description'].should.equal("my key")
+        key['KeyMetadata']['KeyUsage'].should.equal("ENCRYPT_DECRYPT")
+        key['KeyMetadata']['Enabled'].should.equal(True)
+        key['KeyMetadata']['CreationDate'].should.be.a(date)
 
 
 @mock_kms_deprecated
@@ -980,5 +989,3 @@ def test_put_key_policy_key_not_found():
             PolicyName='default',
             Policy='new policy'
         )
-
-

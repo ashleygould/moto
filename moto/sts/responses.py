@@ -1,7 +1,10 @@
 from __future__ import unicode_literals
 
 from moto.core.responses import BaseResponse
+from .exceptions import STSValidationError
 from .models import sts_backend
+
+MAX_FEDERATION_TOKEN_POLICY_LENGTH = 2048
 
 
 class TokenResponse(BaseResponse):
@@ -15,6 +18,15 @@ class TokenResponse(BaseResponse):
     def get_federation_token(self):
         duration = int(self.querystring.get('DurationSeconds', [43200])[0])
         policy = self.querystring.get('Policy', [None])[0]
+
+        if policy is not None and len(policy) > MAX_FEDERATION_TOKEN_POLICY_LENGTH:
+            raise STSValidationError(
+                "1 validation error detected: Value "
+                "'{\"Version\": \"2012-10-17\", \"Statement\": [...]}' "
+                "at 'policy' failed to satisfy constraint: Member must have length less than or "
+                " equal to %s" % MAX_FEDERATION_TOKEN_POLICY_LENGTH
+            )
+
         name = self.querystring.get('Name')[0]
         token = sts_backend.get_federation_token(
             duration=duration, name=name, policy=policy)
@@ -37,6 +49,24 @@ class TokenResponse(BaseResponse):
             external_id=external_id,
         )
         template = self.response_template(ASSUME_ROLE_RESPONSE)
+        return template.render(role=role)
+
+    def assume_role_with_web_identity(self):
+        role_session_name = self.querystring.get('RoleSessionName')[0]
+        role_arn = self.querystring.get('RoleArn')[0]
+
+        policy = self.querystring.get('Policy', [None])[0]
+        duration = int(self.querystring.get('DurationSeconds', [3600])[0])
+        external_id = self.querystring.get('ExternalId', [None])[0]
+
+        role = sts_backend.assume_role_with_web_identity(
+            role_session_name=role_session_name,
+            role_arn=role_arn,
+            policy=policy,
+            duration=duration,
+            external_id=external_id,
+        )
+        template = self.response_template(ASSUME_ROLE_WITH_WEB_IDENTITY_RESPONSE)
         return template.render(role=role)
 
     def get_caller_identity(self):
@@ -84,10 +114,10 @@ ASSUME_ROLE_RESPONSE = """<AssumeRoleResponse xmlns="https://sts.amazonaws.com/d
 2011-06-15/">
   <AssumeRoleResult>
     <Credentials>
-      <SessionToken>BQoEXAMPLEH4aoAH0gNCAPyJxz4BlCFFxWNE1OPTgk5TthT+FvwqnKwRcOIfrRh3c/LTo6UDdyJwOOvEVPvLXCrrrUtdnniCEXAMPLE/IvU1dYUg2RVAJBanLiHb4IgRmpRV3zrkuWJOgQs8IZZaIv2BXIa2R4OlgkBN9bkUDNCJiBeb/AXlzBBko7b15fjrBs2+cTQtpZ3CYWFXG8C5zqx37wnOE49mRl/+OtkIKGO7fAE</SessionToken>
-      <SecretAccessKey>aJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY</SecretAccessKey>
+      <SessionToken>{{ role.session_token }}</SessionToken>
+      <SecretAccessKey>{{ role.secret_access_key }}</SecretAccessKey>
       <Expiration>{{ role.expiration_ISO8601 }}</Expiration>
-      <AccessKeyId>AKIAIOSFODNN7EXAMPLE</AccessKeyId>
+      <AccessKeyId>{{ role.access_key_id }}</AccessKeyId>
     </Credentials>
     <AssumedRoleUser>
       <Arn>{{ role.arn }}</Arn>
@@ -99,6 +129,27 @@ ASSUME_ROLE_RESPONSE = """<AssumeRoleResponse xmlns="https://sts.amazonaws.com/d
     <RequestId>c6104cbe-af31-11e0-8154-cbc7ccf896c7</RequestId>
   </ResponseMetadata>
 </AssumeRoleResponse>"""
+
+
+ASSUME_ROLE_WITH_WEB_IDENTITY_RESPONSE = """<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <AssumeRoleWithWebIdentityResult>
+    <Credentials>
+      <SessionToken>{{ role.session_token }}</SessionToken>
+      <SecretAccessKey>{{ role.secret_access_key }}</SecretAccessKey>
+      <Expiration>{{ role.expiration_ISO8601 }}</Expiration>
+      <AccessKeyId>{{ role.access_key_id }}</AccessKeyId>
+    </Credentials>
+    <AssumedRoleUser>
+      <Arn>{{ role.arn }}</Arn>
+      <AssumedRoleId>ARO123EXAMPLE123:{{ role.session_name }}</AssumedRoleId>
+    </AssumedRoleUser>
+    <PackedPolicySize>6</PackedPolicySize>
+  </AssumeRoleWithWebIdentityResult>
+  <ResponseMetadata>
+    <RequestId>c6104cbe-af31-11e0-8154-cbc7ccf896c7</RequestId>
+  </ResponseMetadata>
+</AssumeRoleWithWebIdentityResponse>"""
+
 
 GET_CALLER_IDENTITY_RESPONSE = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <GetCallerIdentityResult>
