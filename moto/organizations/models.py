@@ -202,7 +202,7 @@ class OrganizationsBackend(BaseBackend):
         master_account = FakeAccount(
             self.org,
             AccountName='master',
-            Email='master@example.com',
+            Email=self.org.master_account_email,
         )
         master_account.id = self.org.master_account_id
         self.accounts.append(master_account)

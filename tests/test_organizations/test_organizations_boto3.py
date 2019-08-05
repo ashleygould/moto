@@ -26,7 +26,17 @@ def test_create_organization():
     response = client.create_organization(FeatureSet='ALL')
     validate_organization(response)
     response['Organization']['FeatureSet'].should.equal('ALL')
+    response = client.list_accounts()
 
+    len(response['Accounts']).should.equal(1)
+    response['Accounts'][0]['Name'].should.equal('master')
+    response['Accounts'][0]['Id'].should.equal(utils.MASTER_ACCOUNT_ID)
+    response['Accounts'][0]['Email'].should.equal(utils.MASTER_ACCOUNT_EMAIL)
+    response = client.list_policies(Filter='SERVICE_CONTROL_POLICY')
+    len(response['Policies']).should.equal(1)
+    response['Policies'][0]['Name'].should.equal('FullAWSAccess')
+    response['Policies'][0]['Id'].should.equal(utils.DEFAULT_POLICY_ID)
+    response['Policies'][0]['AwsManaged'].should.equal(True)
 
 @mock_organizations
 def test_describe_organization():
@@ -591,4 +601,3 @@ def test_list_targets_for_policy_exception():
     ex.operation_name.should.equal('ListTargetsForPolicy')
     ex.response['Error']['Code'].should.equal('400')
     ex.response['Error']['Message'].should.contain('InvalidInputException')
- 
