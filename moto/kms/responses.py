@@ -108,9 +108,10 @@ class KmsResponse(BaseResponse):
         key_usage = self.parameters.get('KeyUsage')
         description = self.parameters.get('Description')
         tags = self.parameters.get('Tags')
+        origin = self.parameters.get('Origin')
 
         key = self.kms_backend.create_key(
-            policy, key_usage, description, tags, self.region)
+            policy, key_usage, description, tags, origin, self.region)
         return json.dumps(key.to_dict())
 
     def update_key_description(self):

@@ -13,7 +13,7 @@ from .utils import decrypt, encrypt, generate_key_id, generate_master_key
 
 
 class Key(BaseModel):
-    def __init__(self, policy, key_usage, description, tags, region):
+    def __init__(self, policy, key_usage, description, tags, origin, region):
         self.id = generate_key_id()
         self.policy = policy
         self.key_usage = key_usage
@@ -26,6 +26,7 @@ class Key(BaseModel):
         self.deletion_date = None
         self.tags = tags or {}
         self.key_material = generate_master_key()
+        self.origin = origin
 
     @property
     def physical_resource_id(self):
@@ -46,6 +47,7 @@ class Key(BaseModel):
                 "KeyId": self.id,
                 "KeyUsage": self.key_usage,
                 "KeyState": self.key_state,
+                "Origin": self.origin,
             }
         }
         if self.key_state == "PendingDeletion":
@@ -66,6 +68,7 @@ class Key(BaseModel):
             description=properties["Description"],
             tags=properties.get("Tags"),
             region=region_name,
+            origin=properties.get("Origin"),
         )
         key.key_rotation_status = properties["EnableKeyRotation"]
         key.enabled = properties["Enabled"]
@@ -84,8 +87,8 @@ class KmsBackend(BaseBackend):
         self.keys = {}
         self.key_to_aliases = defaultdict(set)
 
-    def create_key(self, policy, key_usage, description, tags, region):
-        key = Key(policy, key_usage, description, tags, region)
+    def create_key(self, policy, key_usage, description, tags, origin, region):
+        key = Key(policy, key_usage, description, tags, origin, region)
         self.keys[key.id] = key
         return key
 
