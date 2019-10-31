@@ -26,7 +26,10 @@ class Key(BaseModel):
         self.deletion_date = None
         self.tags = tags or {}
         self.key_material = generate_master_key()
-        self.origin = origin
+        self.key_manager = 'CUSTOMER'
+        self.origin = 'AWS_KMS'
+        if origin:
+            self.origin = origin
 
     @property
     def physical_resource_id(self):
@@ -47,6 +50,7 @@ class Key(BaseModel):
                 "KeyId": self.id,
                 "KeyUsage": self.key_usage,
                 "KeyState": self.key_state,
+                "KeyManager": self.key_manager,
                 "Origin": self.origin,
             }
         }

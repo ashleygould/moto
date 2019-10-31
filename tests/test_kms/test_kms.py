@@ -48,6 +48,8 @@ def test_create_key():
 
         key["KeyMetadata"]["Description"].should.equal("my key")
         key["KeyMetadata"]["KeyUsage"].should.equal("ENCRYPT_DECRYPT")
+        key["KeyMetadata"]["Origin"].should.equal("AWS_KMS")
+        key["KeyMetadata"]["KeyManager"].should.equal("CUSTOMER")
         key["KeyMetadata"]["Enabled"].should.equal(True)
         key["KeyMetadata"]["CreationDate"].should.be.a(date)
 
@@ -61,6 +63,19 @@ def test_describe_key():
     key = conn.describe_key(key_id)
     key["KeyMetadata"]["Description"].should.equal("my key")
     key["KeyMetadata"]["KeyUsage"].should.equal("ENCRYPT_DECRYPT")
+
+
+@mock_kms
+def test_describe_key_external_origin():
+    conn = boto3.client("kms", region_name="us-east-1")
+    key = conn.create_key(Policy="my policy", Description="my other key", Origin="EXTERNAL")
+    key_id = key["KeyMetadata"]["KeyId"]
+
+    key = conn.describe_key(KeyId=key_id)
+    key["KeyMetadata"]["Description"].should.equal("my other key")
+    key["KeyMetadata"]["Origin"].should.equal("EXTERNAL")
+    key["KeyMetadata"]["ValidTo"].should.equal("1549224000.0")
+    key["KeyMetadata"]["ExpirationModel"].should.equal("KEY_MATERIAL_EXPIRES")
 
 
 @mock_kms_deprecated
